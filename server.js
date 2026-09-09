@@ -290,7 +290,7 @@ async function doctor() {
   const checks = [];
   const add = (id, ok, label, detail, fix) => checks.push({ id, ok, label, detail: detail || '', fix: fix || '' });
   const major = Number(process.versions.node.split('.')[0]);
-  add('node', major >= 18, `Node ${process.version}`, process.execPath, major >= 18 ? '' : 'Install Node 18 or newer (nvm or Homebrew) and run bin/golinks node && bin/golinks restart');
+  add('node', major >= 18, `Node ${process.version}`, process.execPath, major >= 18 ? '' : 'Install Node 18 or newer (the .pkg from nodejs.org, nvm or Homebrew) and run bin/golinks node && bin/golinks restart');
   let writable = true;
   try { fs.accessSync(DATA_DIR, fs.constants.W_OK); } catch { writable = false; }
   add('data', writable, 'Data folder writable', DATA_DIR, 'Check permissions on the data folder');

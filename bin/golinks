@@ -13,6 +13,9 @@ STABLE_LINK="$HOME/.golinks"
 OLD_STABLE_LINK=""
 LINKS_HOME="${LINKS_HOME:-$ROOT}"
 MIN_NODE=18
+REPO="${GOLINKS_REPO:-gvensan/golinks}"
+BRANCH="${GOLINKS_BRANCH:-master}"
+TARBALL="https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -50,7 +53,13 @@ find_node() {
     if [ -n "$m" ] && [ "$m" -ge "$MIN_NODE" ]; then echo "$c"; return; fi
   done
   red "Node $MIN_NODE or newer was not found."
-  echo "Install it with nvm (https://github.com/nvm-sh/nvm) or Homebrew (brew install node), then re-run." >&2
+  cat >&2 <<MSG
+Golinks needs Node.js. The easiest way to get it:
+  1. Open https://nodejs.org and click the "Download Node.js (LTS)" button.
+  2. Open the downloaded .pkg and click through the installer.
+  3. Run this command again.
+Developers can use nvm (https://github.com/nvm-sh/nvm) or Homebrew (brew install node) instead.
+MSG
   exit 1
 }
 
@@ -191,11 +200,38 @@ do_doctor() {
     })'
 }
 
+# Copy a fresh checkout or unpacked tarball over ROOT, keeping the user's data, snapshots, logs and node link.
+# copy_code <source dir>
+copy_code() {
+  local src="$1" name f
+  [ -f "$src/server.js" ] || { red "no Golinks code found in $src"; exit 1; }
+  for f in "$src"/* "$src"/.[!.]*; do
+    [ -e "$f" ] || continue
+    name="$(basename "$f")"
+    case "$name" in data|snapshots|logs|.git|.DS_Store) continue ;; esac
+    rm -rf "$ROOT/$name"
+    cp -R "$f" "$ROOT/$name"
+  done
+  if [ -d "$src/data/defaults" ]; then mkdir -p "$ROOT/data/defaults"; cp -R "$src/data/defaults/." "$ROOT/data/defaults/"; fi
+  chmod +x "$ROOT/bin/golinks" "$ROOT/install.sh" "$ROOT/uninstall.sh" 2>/dev/null || true
+}
+
+# Download the latest code without git (for installs made from a zip or the one-line installer).
+download_update() {
+  local tmp; tmp="$(mktemp -d)"
+  echo "downloading $TARBALL"
+  curl -fsSL "$TARBALL" | tar -xz -C "$tmp" || { red "download failed"; rm -rf "$tmp"; exit 1; }
+  local src; src="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  copy_code "$src"
+  rm -rf "$tmp"
+  green "code updated in $ROOT (your data was kept)"
+}
+
 do_update() {
   if [ -d "$ROOT/.git" ]; then
     (cd "$ROOT" && git pull --ff-only) || { red "git pull failed; resolve and re-run"; exit 1; }
   else
-    dim "not a git checkout, skipping pull"
+    download_update
   fi
   link_node
   do_restart
@@ -211,6 +247,7 @@ case "${1:-}" in
   logs) do_logs "${2:-40}" ;;
   doctor) do_doctor ;;
   update) do_update ;;
+  update-from) copy_code "${2:?source folder}" ;;
   open) open "$BASE/" ;;
   run) LINKS_HOME="$LINKS_HOME" exec "$(find_node)" "$ROOT/server.js" ;;
   node) link_node ;;
@@ -225,7 +262,7 @@ usage: golinks <command>
   start | stop | restart  control the service
   status                  pid, health, data location
   doctor                  check node, agent, port, browser permissions
-  update                  git pull, refresh node link, restart
+  update                  get the latest code (git pull, or a download when installed from a zip), restart
   logs [n]                follow the service log
   open                    open the web UI
   run                     run the server in the foreground
