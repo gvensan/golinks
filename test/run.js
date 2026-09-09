@@ -20,7 +20,7 @@ function test(name, fn) {
 
 test('cleanUrl strips tracking params and keeps the rest', () => {
   assert.strictEqual(url.cleanUrl('HTTPS://Example.com/a?b=1&utm_source=x&fbclid=y#frag'), 'https://example.com/a?b=1#frag');
-  assert.strictEqual(url.cleanUrl('docs.solace.com/x'), 'https://docs.solace.com/x');
+  assert.strictEqual(url.cleanUrl('docs.example.com/x'), 'https://docs.example.com/x');
   assert.strictEqual(url.cleanUrl('not a url'), null);
   assert.strictEqual(url.cleanUrl('ftp://x.com/a'), null);
 });
@@ -33,8 +33,8 @@ test('dedupeKey ignores scheme, www, fragment, trailing slash, param order', () 
 });
 
 test('domainLabel', () => {
-  assert.strictEqual(url.domainLabel('https://docs.solace.com/x'), 'solace');
-  assert.strictEqual(url.domainLabel('https://solace.atlassian.net/wiki'), 'atlassian');
+  assert.strictEqual(url.domainLabel('https://docs.example.com/x'), 'example');
+  assert.strictEqual(url.domainLabel('https://acme.atlassian.net/wiki'), 'atlassian');
   assert.strictEqual(url.domainLabel('https://www.bbc.co.uk/news'), 'bbc');
 });
 
@@ -44,15 +44,15 @@ test('rules apply with capture groups', () => {
     { match: 'atlassian\\.net/browse/([A-Za-z]+)-\\d+', tags: ['jira', '$1'] },
     { match: '[invalid(regex', tags: ['never'] },
   ];
-  assert.deepStrictEqual(rules.applyRules('https://solace.atlassian.net/wiki/spaces/X', r), ['confluence']);
-  assert.deepStrictEqual(rules.applyRules('https://solace.atlassian.net/browse/DATAGO-12', r), ['jira', 'datago']);
+  assert.deepStrictEqual(rules.applyRules('https://acme.atlassian.net/wiki/spaces/X', r), ['confluence']);
+  assert.deepStrictEqual(rules.applyRules('https://acme.atlassian.net/browse/PROJ-12', r), ['jira', 'proj']);
   assert.deepStrictEqual(rules.normalizeTags('Event Portal, jira,JIRA'), ['event-portal', 'jira']);
 });
 
 const links = [
-  { id: 'a', url: 'https://solace.atlassian.net/wiki/spaces/EP/pages/1/Design', title: 'Event Portal design notes', tags: ['confluence', 'event-portal'], aliases: ['ep design'], keyword: 'epdesign', created: '2026-01-01T00:00:00Z', lastUsed: null, useCount: 0 },
-  { id: 'b', url: 'https://github.com/SolaceLabs/solace-agent-mesh', title: 'Solace Agent Mesh repo', tags: ['github', 'sam'], aliases: [], keyword: 'sam', created: '2026-01-01T00:00:00Z', lastUsed: new Date().toISOString(), useCount: 20 },
-  { id: 'c', url: 'https://docs.solace.com/Cloud/Event-Portal/event-portal-overview.htm', title: 'Event Portal overview', tags: ['solace-docs'], aliases: [], keyword: null, created: '2020-01-01T00:00:00Z', lastUsed: '2020-02-01T00:00:00Z', useCount: 3 },
+  { id: 'a', url: 'https://acme.atlassian.net/wiki/spaces/EP/pages/1/Design', title: 'Event Portal design notes', tags: ['confluence', 'event-portal'], aliases: ['ep design'], keyword: 'epdesign', created: '2026-01-01T00:00:00Z', lastUsed: null, useCount: 0 },
+  { id: 'b', url: 'https://github.com/acme/service-agent-mesh', title: 'Service Agent Mesh repo', tags: ['github', 'sam'], aliases: [], keyword: 'sam', created: '2026-01-01T00:00:00Z', lastUsed: new Date().toISOString(), useCount: 20 },
+  { id: 'c', url: 'https://docs.example.com/Cloud/Event-Portal/event-portal-overview.htm', title: 'Event Portal overview', tags: ['docs'], aliases: [], keyword: null, created: '2020-01-01T00:00:00Z', lastUsed: '2020-02-01T00:00:00Z', useCount: 3 },
   { id: 'd', url: 'https://example.com/untagged', title: 'Untagged thing', tags: [], aliases: [], keyword: null, created: '2026-01-01T00:00:00Z', lastUsed: null, useCount: 0 },
 ];
 const index = search.buildIndex(links);
@@ -71,7 +71,7 @@ test('search: exact keyword wins', () => {
 
 test('search: operators', () => {
   assert.deepStrictEqual(search.search(index, 'tag:github').results.map((l) => l.id), ['b']);
-  assert.deepStrictEqual(search.search(index, 'site:docs.solace').results.map((l) => l.id), ['c']);
+  assert.deepStrictEqual(search.search(index, 'site:docs.example').results.map((l) => l.id), ['c']);
   assert.deepStrictEqual(search.search(index, 'is:untagged').results.map((l) => l.id), ['d']);
   assert.deepStrictEqual(search.search(index, 'unused:90d docs').results.map((l) => l.id), ['c']);
   assert.deepStrictEqual(search.search(index, 'added:7d').results.map((l) => l.id), []);
@@ -90,7 +90,7 @@ test('search: fuzzy and no-match', () => {
 test('resolveGo: keyword, template, search, fallback', () => {
   const store = { findByKeyword: (k) => links.find((l) => l.keyword === k) || null, findById: (id) => links.find((l) => l.id === id), templates: { jira: 'https://x/browse/{0}', conf: 'https://x/s?text={q}' } };
   assert.strictEqual(search.resolveGo('epdesign', store, index).link.id, 'a');
-  assert.strictEqual(search.resolveGo('jira DATAGO-1', store, index).url, 'https://x/browse/DATAGO-1');
+  assert.strictEqual(search.resolveGo('jira PROJ-1', store, index).url, 'https://x/browse/PROJ-1');
   assert.strictEqual(search.resolveGo('conf event portal', store, index).url, 'https://x/s?text=event%20portal');
   assert.strictEqual(search.resolveGo('agent mesh repo', store, index).link.id, 'b');
   assert.strictEqual(search.resolveGo('nothing here at all', store, index).type, 'search');
@@ -139,14 +139,14 @@ test('store: atomic write, bak, reload', () => {
 });
 
 test('enrich: login detection', () => {
-  assert.strictEqual(looksLikeLogin({ finalUrl: 'https://solace.okta.com/login/login.htm', title: '', html: '' }), true);
+  assert.strictEqual(looksLikeLogin({ finalUrl: 'https://acme.okta.com/login/login.htm', title: '', html: '' }), true);
   assert.strictEqual(looksLikeLogin({ finalUrl: 'https://x.com/a', title: 'Sign in to Confluence', html: '' }), true);
   assert.strictEqual(looksLikeLogin({ finalUrl: 'https://x.com/a', title: 'Design notes', html: '<main>hi</main>' }), false);
 });
 
 test('snapshots: tile svg escapes', () => {
-  const svg = tileSvg('https://docs.solace.com/x', 'A <b> "title"');
-  assert.ok(svg.includes('docs.solace.com'));
+  const svg = tileSvg('https://docs.example.com/x', 'A <b> "title"');
+  assert.ok(svg.includes('docs.example.com'));
   assert.ok(!svg.includes('<b>'));
 });
 

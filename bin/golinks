@@ -4,14 +4,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="dev.golinks"
-OLD_LABELS=("com.giri.solace-links" "com.solace.links")
+OLD_LABELS=()
 AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$AGENTS/$LABEL.plist"
 MB_PLIST="$AGENTS/$LABEL.menubar.plist"
 DOMAIN="gui/$(id -u)"
 NODE_LINK="$ROOT/bin/node"
 STABLE_LINK="$HOME/.golinks"
-OLD_STABLE_LINK="$HOME/.solace-links"
+OLD_STABLE_LINK=""
 LINKS_HOME="${LINKS_HOME:-$ROOT}"
 MIN_NODE=18
 
@@ -79,7 +79,7 @@ bootout_quiet() { if loaded "$1"; then launchctl bootout "$DOMAIN/$1" 2>/dev/nul
 
 migrate_old() {
   local l
-  for l in "${OLD_LABELS[@]}"; do
+  for l in ${OLD_LABELS[@]+"${OLD_LABELS[@]}"}; do
     if loaded "$l" || [ -f "$AGENTS/$l.plist" ]; then
       bootout_quiet "$l"
       rm -f "$AGENTS/$l.plist"
@@ -87,7 +87,7 @@ migrate_old() {
     fi
     bootout_quiet "$l.menubar"; rm -f "$AGENTS/$l.menubar.plist"
   done
-  [ -L "$OLD_STABLE_LINK" ] && rm -f "$OLD_STABLE_LINK" && dim "removed old link $OLD_STABLE_LINK" || true
+  [ -n "$OLD_STABLE_LINK" ] && [ -L "$OLD_STABLE_LINK" ] && rm -f "$OLD_STABLE_LINK" || true
 }
 
 do_install() {

@@ -24,7 +24,7 @@ This links the right Node, registers the service to start at login, adds the
 menu bar icon, and opens the setup checklist at http://localhost:7777/#/setup.
 The checklist walks you through the remaining one-time steps:
 
-1. **Address bar go-links**: add a site search named `Links` with shortcut
+1. **Address bar go-links**: add a site search named `Go Links` with shortcut
    `go` and URL `http://localhost:7777/go/%s` (Chrome, Brave and Edge; Safari
    has no site search).
 2. **Bookmarklet**: drag "Add to Links" to your bookmarks bar.
@@ -42,7 +42,7 @@ Check everything with `bin/golinks doctor`. Remove everything with
 
 | Want to | Do |
 | --- | --- |
-| Open a link fast | Address bar: `go expenses`, `go jira DATAGO-12`, `go event portal` |
+| Open a link fast | Address bar: `go expenses`, `go jira PROJ-123`, `go event portal` |
 | Save the page you are on, with screenshot | Click the bookmarklet, or menu bar icon > Add current tab, or Ctrl+Option+A |
 | Search from anywhere | Menu bar icon > Search links, or Ctrl+Option+L |
 | Browse, edit, tag | Menu bar icon > Open Golinks (or http://localhost:7777) |
@@ -58,7 +58,7 @@ initials, so `ep` finds "Event Portal design".
 
 **Go keyword**: give a link a short unique name in the edit drawer, then
 `go name` opens it directly. **Templates** (Settings) add parameterized ones:
-`go jira DATAGO-12`, `go conf event portal`. Anything else runs a search and
+`go jira PROJ-123`, `go conf event portal`. Anything else runs a search and
 opens the best match when it is confident, otherwise the UI with results.
 
 ## Snapshots

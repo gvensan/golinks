@@ -711,7 +711,7 @@
       '<label><input type="checkbox" id="sRevisit" ' + (s.snapshotOnRevisit ? 'checked' : '') + '> Snapshot on revisit (used by the open Shortcut)</label></div></div>' +
       '<div class="actions"><button class="btn primary" id="sSave">Save settings</button><span id="sMsg" class="small muted"></span></div></div>' +
 
-      '<div class="card-box"><h2 style="margin-top:0">Templates</h2><p class="small muted">Parameterized go-links. <code>{0}</code> <code>{1}</code> are words after the name, <code>{q}</code> is everything after the name URL-encoded, <code>{*}</code> raw. Example: <code>go jira DATAGO-1234</code>.</p>' +
+      '<div class="card-box"><h2 style="margin-top:0">Templates</h2><p class="small muted">Parameterized go-links. <code>{0}</code> <code>{1}</code> are words after the name, <code>{q}</code> is everything after the name URL-encoded, <code>{*}</code> raw. Example: <code>go jira PROJ-123</code>.</p>' +
       '<div class="field"><textarea class="code" id="sTemplates">' + esc(JSON.stringify(m.templates, null, 2)) + '</textarea></div>' +
       '<div class="actions"><button class="btn" id="sTemplatesSave">Save templates</button><span id="sTemplatesMsg" class="small muted"></span></div></div>' +
 
@@ -720,7 +720,7 @@
       '<div class="actions"><button class="btn" id="sRulesSave">Save rules</button><span id="sRulesMsg" class="small muted"></span></div></div>' +
 
       '<div class="card-box"><h2 style="margin-top:0">Capture from Chrome</h2>' +
-      '<p><b>Omnibox:</b> in Chrome go to <code>chrome://settings/searchEngines</code>, add a site search with shortcut <code>go</code> and URL <code>http://localhost:' + health.port + '/go/%s</code>. Then type <code>go epdesign</code> or <code>go jira DATAGO-12</code> in the address bar.</p>' +
+      '<p><b>Omnibox:</b> in Chrome go to <code>chrome://settings/searchEngines</code>, add a site search named <code>Go Links</code> with shortcut <code>go</code> and URL <code>http://localhost:' + health.port + '/go/%s</code>. Then type <code>go epdesign</code> or <code>go jira PROJ-123</code> in the address bar.</p>' +
       '<p><b>Bookmarklet:</b> drag this to the bookmarks bar: <a class="btn" id="bmLink" href="' + esc(bm.href) + '" onclick="return false">Add to Links</a> <button class="btn sm ghost" id="bmCopy">Copy code</button></p>' +
       '<p><b>Menu bar and hotkeys:</b> see <code>shortcuts/README.md</code> for the two Apple Shortcuts (search, add current tab with screenshot) and the start/stop entries.</p></div>' +
 
@@ -803,8 +803,8 @@
       step('service', 'Service is running', 'Version ' + esc(health.version) + ' on port ' + health.port + ', started at login by launchd. Menu bar icon: <code>bin/golinks menubar status</code>.', true) +
       step('go', 'Address bar go-links', '<p>In your browser open the site-search settings and add an entry:</p>' +
         '<div class="kv"><span>Chrome</span><code>chrome://settings/searchEngines</code><span>Brave</span><code>brave://settings/searchEngines</code><span>Edge</span><code>edge://settings/searchEngines</code></div>' +
-        '<div class="kv"><span>Name</span><code>Links</code><span>Shortcut</span><code>go</code><span>URL</span><code id="goUrl">' + esc(goUrl) + '</code> <button class="btn sm" id="copyGo">Copy URL</button></div>' +
-        '<p class="small muted">Then type <code>go</code>, Space, and a keyword such as <code>go expenses</code> or <code>go jira DATAGO-12</code>. Safari has no site search; use the menu bar search there.</p>') +
+        '<div class="kv"><span>Name</span><code>Go Links</code><span>Shortcut</span><code>go</code><span>URL</span><code id="goUrl">' + esc(goUrl) + '</code> <button class="btn sm" id="copyGo">Copy URL</button></div>' +
+        '<p class="small muted">Then type <code>go</code>, Space, and a keyword such as <code>go expenses</code> or <code>go jira PROJ-123</code>. Safari has no site search; use the menu bar search there.</p>') +
       step('bookmarklet', 'Bookmarklet: save any page with a screenshot', '<p>Drag this button to your bookmarks bar: <a class="btn" href="' + esc(bm.href) + '" onclick="return false">Add to Links</a> <button class="btn sm ghost" id="copyBm">Copy code</button></p><p class="small muted">Click it on any page, including SSO pages. A popup shows the screenshot of the page and suggested tags; Cmd+Enter saves.</p>') +
       step('permissions', 'Allow screenshots of your browser', '<p>macOS must let the service (the <code>node</code> process) read browser tabs and capture the screen. Automation is asked for automatically on first use. Screen Recording has to be enabled by hand:</p>' +
         '<ol class="small"><li>System Settings > Privacy & Security > Screen & System Audio Recording.</li><li>Enable <code>node</code>. If it is missing, press <b>+</b>, then Cmd+Shift+G and paste: <code id="execPath">' + esc(health.execPath) + '</code> <button class="btn sm" id="copyExec">Copy path</button></li><li>Run <code>bin/golinks restart</code>, then Re-check below.</li></ol>' +
