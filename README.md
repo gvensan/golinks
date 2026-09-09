@@ -36,7 +36,8 @@ The checklist walks you through the remaining one-time steps:
 5. **Import** your existing bookmarks from the Import page.
 
 Check everything with `bin/golinks doctor`. Remove everything with
-`bin/golinks uninstall` (your data stays in the folder).
+`./uninstall.sh` (your data stays in the folder) or `./uninstall.sh --purge`
+(deletes your links and snapshots too).
 
 ## Daily use
 
@@ -76,7 +77,8 @@ bin/golinks status | doctor | logs        health, permission checks, log tail
 bin/golinks stop | start | restart        control the service
 bin/golinks update                        git pull, refresh node link, restart
 bin/golinks menubar install|start|stop    menu bar icon
-bin/golinks install [--no-menubar]        (re)install; uninstall removes agents
+bin/golinks install [--no-menubar]        (re)install the agents
+./uninstall.sh [--purge]                  remove agents and links; --purge also deletes your data
 ```
 
 The service starts at every login. A crash restarts it within seconds; a
