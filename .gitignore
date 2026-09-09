@@ -1,0 +1,11 @@
+logs/
+node_modules/
+.DS_Store
+
+# Personal data lives here but is not part of the shared code.
+# Make data/ (and snapshots/) its own private git repo if you want to sync between machines.
+data/*
+!data/defaults/
+!data/defaults/**
+snapshots/
+bin/node

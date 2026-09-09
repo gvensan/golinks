@@ -1,0 +1,247 @@
+#!/bin/bash
+# golinks: control the Golinks service (a launchd login agent) and its menu bar icon.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LABEL="dev.golinks"
+OLD_LABELS=("com.giri.solace-links" "com.solace.links")
+AGENTS="$HOME/Library/LaunchAgents"
+PLIST="$AGENTS/$LABEL.plist"
+MB_PLIST="$AGENTS/$LABEL.menubar.plist"
+DOMAIN="gui/$(id -u)"
+NODE_LINK="$ROOT/bin/node"
+STABLE_LINK="$HOME/.golinks"
+OLD_STABLE_LINK="$HOME/.solace-links"
+LINKS_HOME="${LINKS_HOME:-$ROOT}"
+MIN_NODE=18
+
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+dim() { printf '\033[2m%s\033[0m\n' "$*"; }
+
+port() {
+  if [ -f "$LINKS_HOME/data/settings.json" ]; then
+    sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$LINKS_HOME/data/settings.json" | head -1
+  fi
+}
+PORT="${LINKS_PORT:-$(port)}"
+PORT="${PORT:-7777}"
+BASE="http://127.0.0.1:$PORT"
+
+node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p'; }
+
+find_node() {
+  # Order: nvm default alias, newest nvm node, Volta, Homebrew, PATH. Must be >= MIN_NODE.
+  local nvm_dir="${NVM_DIR:-$HOME/.nvm}" cand=() alias v
+  if [ -f "$nvm_dir/alias/default" ]; then
+    alias="$(cat "$nvm_dir/alias/default")"
+    v="$(ls "$nvm_dir/versions/node" 2>/dev/null | grep -E "^v?${alias#v}" | sort -V | tail -1 || true)"
+    [ -n "$v" ] && cand+=("$nvm_dir/versions/node/$v/bin/node")
+  fi
+  if [ -d "$nvm_dir/versions/node" ]; then
+    v="$(ls "$nvm_dir/versions/node" | sort -V | tail -1)"
+    [ -n "$v" ] && cand+=("$nvm_dir/versions/node/$v/bin/node")
+  fi
+  cand+=("$HOME/.volta/bin/node" "/opt/homebrew/bin/node" "/usr/local/bin/node")
+  if command -v node >/dev/null 2>&1; then cand+=("$(command -v node)"); fi
+  local c m
+  for c in "${cand[@]}"; do
+    [ -x "$c" ] || continue
+    m="$(node_major "$c")"
+    if [ -n "$m" ] && [ "$m" -ge "$MIN_NODE" ]; then echo "$c"; return; fi
+  done
+  red "Node $MIN_NODE or newer was not found."
+  echo "Install it with nvm (https://github.com/nvm-sh/nvm) or Homebrew (brew install node), then re-run." >&2
+  exit 1
+}
+
+link_node() {
+  local n; n="$(find_node)"
+  ln -sfn "$n" "$NODE_LINK"
+  echo "bin/node -> $n ($("$NODE_LINK" --version))"
+}
+
+link_stable() {
+  ln -sfn "$ROOT" "$STABLE_LINK"
+  echo "$STABLE_LINK -> $ROOT"
+}
+
+render() {
+  # render <template> <out>
+  mkdir -p "$AGENTS" "$ROOT/logs"
+  sed -e "s|__ROOT__|$ROOT|g" -e "s|__LABEL__|$LABEL|g" -e "s|__HOME__|$HOME|g" -e "s|__PORT__|$PORT|g" -e "s|__LINKS_HOME__|$LINKS_HOME|g" "$1" > "$2"
+  plutil -lint "$2" >/dev/null
+}
+
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+
+bootout_quiet() { if loaded "$1"; then launchctl bootout "$DOMAIN/$1" 2>/dev/null || true; sleep 0.5; fi; }
+
+migrate_old() {
+  local l
+  for l in "${OLD_LABELS[@]}"; do
+    if loaded "$l" || [ -f "$AGENTS/$l.plist" ]; then
+      bootout_quiet "$l"
+      rm -f "$AGENTS/$l.plist"
+      dim "removed old agent $l"
+    fi
+    bootout_quiet "$l.menubar"; rm -f "$AGENTS/$l.menubar.plist"
+  done
+  [ -L "$OLD_STABLE_LINK" ] && rm -f "$OLD_STABLE_LINK" && dim "removed old link $OLD_STABLE_LINK" || true
+}
+
+do_install() {
+  migrate_old
+  link_node
+  link_stable
+  render "$ROOT/launchd/$LABEL.plist.tmpl" "$PLIST"
+  bootout_quiet "$LABEL"
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
+  green "service installed and started (runs at every login)"
+  if [ "${1:-}" != "--no-menubar" ]; then mb_install || dim "menu bar icon not installed (service still works)"; fi
+  sleep 1
+  do_status
+}
+
+do_uninstall() {
+  mb_uninstall
+  bootout_quiet "$LABEL"
+  rm -f "$PLIST"
+  [ -L "$STABLE_LINK" ] && rm -f "$STABLE_LINK"
+  green "uninstalled. Your links, snapshots and settings are untouched in $LINKS_HOME"
+}
+
+do_start() {
+  [ -f "$PLIST" ] || { echo "not installed, run: golinks install"; exit 1; }
+  if loaded "$LABEL"; then launchctl kickstart "$DOMAIN/$LABEL"; else launchctl bootstrap "$DOMAIN" "$PLIST"; fi
+  sleep 1
+  do_status
+}
+
+do_stop() {
+  if loaded "$LABEL"; then launchctl bootout "$DOMAIN/$LABEL"; echo "stopped (stays down until login or golinks start)"; else echo "not running"; fi
+}
+
+do_restart() {
+  if ! loaded "$LABEL"; then do_start; return; fi
+  launchctl kickstart -k "$DOMAIN/$LABEL"
+  sleep 1
+  do_status
+}
+
+do_status() {
+  if loaded "$LABEL"; then
+    local info pid exitcode
+    info="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null || true)"
+    pid="$(echo "$info" | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)"
+    exitcode="$(echo "$info" | sed -n 's/^[[:space:]]*last exit code = \(.*\)$/\1/p' | head -1)"
+    echo "service:  loaded, pid ${pid:-none}, last exit ${exitcode:-n/a}"
+  else
+    echo "service:  not loaded"
+  fi
+  if loaded "$LABEL.menubar"; then echo "menubar:  running"; else echo "menubar:  not running"; fi
+  echo "url:      $BASE"
+  if health="$(curl -fsS --max-time 2 "$BASE/api/health" 2>/dev/null)"; then
+    echo "health:   $health"
+    case "$health" in *'"restartNeeded":true'*) dim "code changed since start: run golinks restart";; esac
+  else
+    echo "health:   no response"
+  fi
+  echo "data:     $LINKS_HOME/data"
+}
+
+do_logs() {
+  mkdir -p "$ROOT/logs"; touch "$ROOT/logs/out.log" "$ROOT/logs/err.log"
+  tail -n "${1:-40}" -f "$ROOT/logs/out.log" "$ROOT/logs/err.log"
+}
+
+do_doctor() {
+  echo "Golinks doctor"
+  echo "-------------------"
+  local n; n="$(readlink "$NODE_LINK" 2>/dev/null || true)"
+  if [ -n "$n" ] && [ -x "$n" ]; then green "ok   node: $n ($("$n" --version))"; else red "FAIL node: bin/node missing, run golinks install"; fi
+  if [ -f "$PLIST" ]; then green "ok   agent plist: $PLIST"; else red "FAIL agent not installed, run golinks install"; fi
+  if loaded "$LABEL"; then green "ok   agent loaded"; else red "FAIL agent not loaded, run golinks start"; fi
+  if [ -L "$STABLE_LINK" ]; then green "ok   stable link: $STABLE_LINK -> $(readlink "$STABLE_LINK")"; else dim "     stable link ~/.golinks missing, run golinks install"; fi
+  if loaded "$LABEL.menubar"; then green "ok   menu bar icon running"; else dim "     menu bar icon not running (golinks menubar install)"; fi
+  if ! curl -fsS --max-time 3 "$BASE/api/health" >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then red "FAIL port $PORT is used by another process: $(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | tail -1 | awk '{print $1, $2}')"; else red "FAIL service not responding on $BASE (see golinks logs)"; fi
+    return 1
+  fi
+  green "ok   service answers on $BASE"
+  curl -fsS --max-time 60 "$BASE/api/doctor" | "$NODE_LINK" -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const r=JSON.parse(s);
+      for (const c of r.checks) {
+        const tag = c.ok===true ? "\x1b[32mok  \x1b[0m" : c.ok===false ? "\x1b[31mFAIL\x1b[0m" : "\x1b[33mskip\x1b[0m";
+        console.log(`${tag} ${c.label}${c.detail ? ": " + c.detail : ""}`);
+        if (c.ok===false && c.fix) console.log(`     fix: ${c.fix}`);
+      }
+      if (r.restartNeeded) console.log("\x1b[33mnote\x1b[0m code changed since the service started: run golinks restart");
+    })'
+}
+
+do_update() {
+  if [ -d "$ROOT/.git" ]; then
+    (cd "$ROOT" && git pull --ff-only) || { red "git pull failed; resolve and re-run"; exit 1; }
+  else
+    dim "not a git checkout, skipping pull"
+  fi
+  link_node
+  do_restart
+}
+
+# ---- menu bar icon (JXA status item, no app bundle) ----
+mb_install() {
+  render "$ROOT/launchd/$LABEL.menubar.plist.tmpl" "$MB_PLIST"
+  bootout_quiet "$LABEL.menubar"
+  launchctl bootstrap "$DOMAIN" "$MB_PLIST"
+  green "menu bar icon installed"
+}
+mb_uninstall() { bootout_quiet "$LABEL.menubar"; rm -f "$MB_PLIST"; echo "menu bar icon removed"; }
+mb_start() { [ -f "$MB_PLIST" ] || mb_install; if loaded "$LABEL.menubar"; then launchctl kickstart -k "$DOMAIN/$LABEL.menubar"; else launchctl bootstrap "$DOMAIN" "$MB_PLIST"; fi; echo "menu bar icon started"; }
+mb_stop() { bootout_quiet "$LABEL.menubar"; echo "menu bar icon stopped"; }
+
+case "${1:-}" in
+  install) do_install "${2:-}" ;;
+  uninstall) do_uninstall ;;
+  start) do_start ;;
+  stop) do_stop ;;
+  restart) do_restart ;;
+  status) do_status ;;
+  logs) do_logs "${2:-40}" ;;
+  doctor) do_doctor ;;
+  update) do_update ;;
+  open) open "$BASE/" ;;
+  run) LINKS_HOME="$LINKS_HOME" exec "$(find_node)" "$ROOT/server.js" ;;
+  node) link_node ;;
+  search) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/search.js" "$@" ;;
+  add-tab) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/add-current-tab.js" "$@" ;;
+  service) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/service.js" "$@" ;;
+  menubar)
+    case "${2:-}" in
+      install) mb_install ;; uninstall) mb_uninstall ;; start) mb_start ;; stop) mb_stop ;;
+      status) if loaded "$LABEL.menubar"; then echo running; else echo stopped; fi ;;
+      *) echo "usage: golinks menubar install|uninstall|start|stop|status" ;;
+    esac ;;
+  *)
+    cat <<USAGE
+usage: golinks <command>
+  install [--no-menubar]  set up everything: node link, ~/.golinks link, login agent, menu bar icon
+  uninstall               remove agents and links; your data stays
+  start | stop | restart  control the service
+  status                  pid, health, data location
+  doctor                  check node, agent, port, browser permissions
+  update                  git pull, refresh node link, restart
+  logs [n]                follow the service log
+  open                    open the web UI
+  run                     run the server in the foreground
+  node                    refresh bin/node after a node upgrade
+  search [words]          menu bar search (used by the Shortcut)
+  add-tab                 save the current browser tab with a screenshot (used by the Shortcut)
+  service start|stop|toggle|status
+  menubar install|uninstall|start|stop|status
+USAGE
+    ;;
+esac

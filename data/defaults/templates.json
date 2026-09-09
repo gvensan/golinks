@@ -1,0 +1,9 @@
+{
+  "jira": "https://solace.atlassian.net/browse/{0}",
+  "conf": "https://solace.atlassian.net/wiki/search?text={q}",
+  "gh": "https://github.com/{0}",
+  "npm": "https://www.npmjs.com/package/{0}",
+  "g": "https://www.google.com/search?q={q}",
+  "docs": "https://docs.solace.com/Search.htm?q={q}",
+  "so": "https://stackoverflow.com/search?q={q}"
+}
