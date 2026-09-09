@@ -16,9 +16,8 @@ data is plain JSON and JPEG files in this folder.
 Two and a half minutes with captions: search and operators, go keywords, the
 folder tree, dragging a card into a folder, the edit drawer with suggestions,
 adding a link, and import and export. A sharper MP4 of the same walkthrough is
-at [docs/demo.mp4](docs/demo.mp4). The recording is scripted against a demo
-data set of public sites; `docs/demo/seed.sh` and `docs/demo/record.mjs`
-regenerate it.
+at [docs/demo.mp4](docs/demo.mp4). The recording uses a demo data set of
+public sites, not real bookmarks.
 
 ## Install (2 minutes)
 
