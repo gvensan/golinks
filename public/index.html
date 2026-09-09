@@ -11,11 +11,12 @@
 <div id="banner" class="hidden"></div>
 <div class="app">
   <aside class="side" id="side"></aside>
+  <div class="side-resizer" id="sideResizer" title="Drag to resize, double-click to fit the content"></div>
   <main>
     <header class="top">
       <div class="searchbox">
         <span class="glass">&#9906;</span>
-        <input id="q" type="text" placeholder="Search links, tags, keywords. Try tag:jira or unused:90d" autocomplete="off" spellcheck="false">
+        <input id="q" type="text" placeholder="Search links, tags, keywords. Try tag:jira, in:work or unused:90d" autocomplete="off" spellcheck="false">
         <span class="hint"><kbd>&#8984;K</kbd></span>
       </div>
     </header>
@@ -24,9 +25,12 @@
   </main>
 </div>
 <aside id="drawer" aria-hidden="true"></aside>
+<a class="fab" id="fab" href="#/add" title="Add link (N)" aria-label="Add link"><svg viewBox="0 0 16 16" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg></a>
 <div id="preview"><img alt=""><div class="cap"></div></div>
 <div id="toast"></div>
 <script src="/chips.js"></script>
+<script src="/folderpick.js"></script>
+<script src="/suggestui.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Remove Golinks from this Mac.
-#   ./uninstall.sh            stop and remove the login agents, menu bar icon and ~/.golinks link; keep your data
+#   ./uninstall.sh            stop and remove the login agent (and the pre-1.2 menu bar agent) and ~/.golinks link; keep your data
 #   ./uninstall.sh --purge    also delete your links, snapshots, settings, logs and backups (asks first)
 #   ./uninstall.sh --purge --yes    no questions
 set -euo pipefail
@@ -27,7 +27,7 @@ rm -f "$ROOT/bin/node"
 
 # 2. Make sure nothing from this folder is still running.
 pkill -f "$ROOT/server.js" 2>/dev/null || true
-pkill -f "$ROOT/menubar/menubar.js" 2>/dev/null || true
+pkill -f "$ROOT/menubar/menubar.js" 2>/dev/null || true   # pre-1.2 menu bar icon, if still running
 
 # 3. Optionally remove personal data.
 if [ "$PURGE" = 1 ]; then
@@ -54,7 +54,7 @@ Golinks is uninstalled. Things macOS and your browser keep, remove by hand if yo
   - Browser site search "Go Links" (chrome://settings/searchEngines or brave://settings/searchEngines)
   - The "Add to Golinks" bookmarklet on your bookmarks bar
   - The two Shortcuts (Links: search, Links: add current tab) in the Shortcuts app
-  - Permissions granted to "node" and "osascript" under System Settings > Privacy & Security
+  - Permissions granted to "node" and "Shortcuts" under System Settings > Privacy & Security
     (Automation, Screen Recording); harmless to leave in place
   - This folder: rm -rf "$ROOT"
 MSG

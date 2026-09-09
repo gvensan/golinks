@@ -10,11 +10,15 @@ const path = require('path');
 const { Store, ROOT, HOME_DIR, DATA_DIR } = require('./lib/store');
 const { cleanUrl, dedupeKey, hostname } = require('./lib/url');
 const { applyRules, normalizeTags, slugTag } = require('./lib/rules');
+const folders = require('./lib/folders');
 const search = require('./lib/search');
 const { enrich } = require('./lib/enrich');
 const snapshots = require('./lib/snapshots');
 const importer = require('./lib/importer');
 const capture = require('./lib/capture');
+const suggest = require('./lib/suggest');
+const exporter = require('./lib/exporter');
+const browserbatch = require('./lib/browserbatch');
 const { HttpError, sendJson, sendText, redirect, readJson, serveFile } = require('./lib/http');
 
 const VERSION = require('./package.json').version;
@@ -93,7 +97,7 @@ async function captureFor(id, mode, info) {
 // ---------------------------------------------------------------------------
 // Link CRUD
 
-const EDITABLE = ['url', 'title', 'description', 'tags', 'aliases', 'keyword', 'notes', 'collection'];
+const EDITABLE = ['url', 'title', 'description', 'tags', 'aliases', 'keyword', 'notes', 'folder'];
 
 function normalizeList(v) {
   if (typeof v === 'string') v = v.split(/[,\n]+/);
@@ -109,6 +113,16 @@ function normalizeKeyword(v, selfId) {
   if (clash && clash.id !== selfId) throw new HttpError(409, `keyword "${k}" already used by "${clash.title}"`, { link: clash });
   if (store.templates && Object.keys(store.templates).some((t) => t.toLowerCase() === k)) throw new HttpError(409, `"${k}" is a template name`);
   return k;
+}
+
+// Normalizes a folder path and records it (with its ancestors) in folders.json.
+function setFolder(v) {
+  const p = folders.normalizeFolder(v);
+  if (!p) return null;
+  const before = store.folders.length;
+  const path = store.ensureFolder(p);
+  if (store.folders.length !== before) store.save('folders');
+  return path;
 }
 
 function findDuplicate(url, selfId) {
@@ -159,7 +173,7 @@ async function createLink(body) {
     aliases: normalizeList(body.aliases),
     keyword: normalizeKeyword(body.keyword, id),
     notes: String(body.notes || '').trim(),
-    collection: body.collection ? String(body.collection).trim() : null,
+    folder: setFolder('folder' in body ? body.folder : body.collection),
     created: now,
     lastUsed: null,
     useCount: 0,
@@ -193,6 +207,8 @@ async function createLink(body) {
 }
 
 function updateLink(link, body) {
+  // `collection` is the pre-1.2 name of `folder`; still accepted from old callers.
+  if ('collection' in body && !('folder' in body)) body = { ...body, folder: body.collection };
   for (const key of EDITABLE) {
     if (!(key in body)) continue;
     const v = body[key];
@@ -205,7 +221,7 @@ function updateLink(link, body) {
     } else if (key === 'tags') link.tags = normalizeTags(v);
     else if (key === 'aliases') link.aliases = normalizeList(v);
     else if (key === 'keyword') link.keyword = normalizeKeyword(v, link.id);
-    else if (key === 'collection') link.collection = v ? String(v).trim() : null;
+    else if (key === 'folder') link.folder = setFolder(v);
     else link[key] = String(v ?? '').trim();
   }
   if (!link.title) link.title = hostname(link.url);
@@ -230,16 +246,32 @@ function deleteLink(link) {
   reindex();
 }
 
-function captureFromBrowser(url) {
+// Screenshot the browser tab showing url. When no tab has it open (or the tab sits on
+// another Space), open the page in a new tab of the front browser window, capture, close it.
+// opts.open === false disables that fallback (the Add page and popup probe silently).
+async function captureFromBrowser(url, opts = {}) {
   if (!cleanUrl(url)) throw new HttpError(400, 'a valid url is required');
+  const toHttp = (err) => {
+    if (err instanceof capture.CaptureError) {
+      const status = err.code === 'notab' ? 404 : err.code === 'badurl' ? 400 : 503;
+      return new HttpError(status, err.message, { code: err.code });
+    }
+    return err;
+  };
   try {
     return capture.captureUrl(url, { topCrop: store.settings.topCrop, maxWidth: 960 });
   } catch (err) {
-    if (err instanceof capture.CaptureError) {
-      const status = err.code === 'notab' ? 404 : err.code === 'badurl' ? 400 : 503;
-      throw new HttpError(status, err.message, { code: err.code });
+    const canOpen = opts.open !== false && err instanceof capture.CaptureError && (err.code === 'notab' || err.code === 'offscreen');
+    if (!canOpen) throw toHttp(err);
+    if (browserbatch.status().running) throw new HttpError(409, 'A browser capture batch is running; wait for it to finish or stop it in Settings.');
+    try {
+      const cap = await browserbatch.captureByOpening(url, { topCrop: store.settings.topCrop, maxWidth: 960 });
+      log('[capture] opened', url.slice(0, 80), 'in', cap.app);
+      return cap;
+    } catch (err2) {
+      if (err2.code === 'login') throw new HttpError(409, err2.message, { code: 'login' });
+      throw toHttp(err2);
     }
-    throw err;
   }
 }
 
@@ -295,12 +327,11 @@ async function doctor() {
 function meta() {
   const now = Date.now();
   const tags = new Map();
-  const cols = new Map();
-  let untagged = 0, stale = 0, recent = 0, mostused = 0, keywords = 0, nosnap = 0;
+  let untagged = 0, stale = 0, recent = 0, mostused = 0, keywords = 0, nosnap = 0, unfiled = 0;
   for (const l of store.links) {
     if (!l.tags || !l.tags.length) untagged++;
     for (const t of l.tags || []) tags.set(t, (tags.get(t) || 0) + 1);
-    if (l.collection) cols.set(l.collection, (cols.get(l.collection) || 0) + 1);
+    if (!l.folder) unfiled++;
     if (search.isStale(l, store.settings.staleDays, now)) stale++;
     if (l.lastUsed && now - Date.parse(l.lastUsed) < 30 * 86400000) recent++;
     if (l.useCount > 0) mostused++;
@@ -311,18 +342,30 @@ function meta() {
   return {
     version: VERSION,
     port: PORT,
-    counts: { all: store.links.length, untagged, stale, recent, mostused, keywords, nosnapshot: nosnap },
+    counts: { all: store.links.length, untagged, stale, recent, mostused, keywords, nosnapshot: nosnap, unfiled },
     tags: sortCount(tags),
-    collections: sortCount(cols),
+    folders: folders.listFolders(store.links, store.folders),
     templates: store.templates,
     rulesCount: store.rules.length,
+    exportFormats: Object.entries(exporter.FORMATS).map(([id, f]) => ({ id, label: f.label, ext: f.ext })),
+    setupComplete: ['go', 'bookmarklet', 'permissions'].every((k) => store.settings.setup && store.settings.setup[k]),
     settings: store.settings,
     pendingSnapshots: [...pending],
+    snapshotStats: { missing: store.links.filter((l) => !l.snapshot).length, tiles: store.links.filter((l) => l.snapshotMethod === 'tile').length },
+    browserBatch: browserbatch.status(),
     chrome: Boolean(snapshots.chromeBinary()),
     execPath: process.execPath,
     home: HOME_DIR,
     restartNeeded: codeChangedSinceStart(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Suggestions (folder, tags, keyword) for a URL being saved or edited
+
+function suggestFor(url, opts = {}) {
+  const taken = (k) => Boolean(store.findByKeyword(k) && store.findByKeyword(k).id !== opts.selfId) || Object.keys(store.templates || {}).some((t) => t.toLowerCase() === k);
+  return suggest.suggest(url, { ...opts, links: store.links, isKeywordTaken: taken });
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +388,11 @@ function bookmarkletCode() {
 function param(url, name, def = '') {
   const v = url.searchParams.get(name);
   return v === null ? def : v;
+}
+
+// ?folder=Work/Projects (or the old ?collection=) normalized, else null.
+function folderParam(url) {
+  return folders.normalizeFolder(param(url, 'folder', null) || param(url, 'collection', null));
 }
 
 function getLinkOr404(id) {
@@ -392,7 +440,7 @@ async function route(req, res, url) {
   if (p === '/api/search' && method === 'GET') {
     const r = search.search(index, param(url, 'q'), {
       tag: param(url, 'tag', null),
-      collection: param(url, 'collection', null),
+      folder: folderParam(url),
       view: param(url, 'view', null),
       limit: Number(param(url, 'limit', 200)) || 200,
       staleDays: store.settings.staleDays,
@@ -404,8 +452,8 @@ async function route(req, res, url) {
   if (p === '/api/links') {
     if (method === 'GET') {
       const q = param(url, 'q');
-      if (q || url.searchParams.has('tag') || url.searchParams.has('collection') || url.searchParams.has('view')) {
-        const r = search.search(index, q, { tag: param(url, 'tag', null), collection: param(url, 'collection', null), view: param(url, 'view', null), limit: 10000, staleDays: store.settings.staleDays });
+      if (q || url.searchParams.has('tag') || url.searchParams.has('folder') || url.searchParams.has('collection') || url.searchParams.has('view')) {
+        const r = search.search(index, q, { tag: param(url, 'tag', null), folder: folderParam(url), view: param(url, 'view', null), limit: 10000, staleDays: store.settings.staleDays });
         return sendJson(res, 200, { total: r.total, links: r.results });
       }
       return sendJson(res, 200, { total: store.links.length, links: store.links.map(decorate) });
@@ -415,6 +463,70 @@ async function route(req, res, url) {
       const link = await createLink(body);
       return sendJson(res, 201, { link: decorate(link) });
     }
+  }
+
+  // Queue background snapshot captures. only: "missing" (no snapshot), "tiles" (missing or a
+  // generated tile), "all". Public pages get a real capture, SSO pages fall back to a tile.
+  if (p === '/api/snapshots/refresh' && method === 'POST') {
+    const body = await readJson(req);
+    const only = ['missing', 'tiles', 'all'].includes(body.only) ? body.only : 'tiles';
+    let n = 0;
+    for (const l of store.links) {
+      const pick = only === 'all' || !l.snapshot || (only === 'tiles' && l.snapshotMethod === 'tile');
+      if (!pick || pending.has(l.id)) continue;
+      enqueueSnapshot(l.id, 'auto', null);
+      n++;
+    }
+    return sendJson(res, 200, { queued: n, pending: pending.size });
+  }
+
+  // Capture through the user's browser: opens each page in a tab, screenshots, closes it.
+  // body: { ids?: [...] } or { only: "missing" | "tiles" | "all" }, optional app.
+  if (p === '/api/snapshots/browser' && method === 'POST') {
+    const body = await readJson(req);
+    let links;
+    if (Array.isArray(body.ids)) links = body.ids.map((id) => store.findById(id)).filter(Boolean);
+    else {
+      const only = ['missing', 'tiles', 'all'].includes(body.only) ? body.only : 'tiles';
+      links = store.links.filter((l) => only === 'all' || !l.snapshot || (only === 'tiles' && l.snapshotMethod === 'tile'));
+    }
+    if (!links.length) return sendJson(res, 200, { started: false, reason: 'nothing to capture', batch: browserbatch.status() });
+    try {
+      const st = await browserbatch.start({
+        links, app: body.app, topCrop: store.settings.topCrop, maxWidth: 960,
+        onSaved: async (link, buffer, info) => {
+          const current = store.findById(link.id);
+          if (!current) return;
+          current.snapshot = snapshots.saveBuffer(current.id, buffer);
+          current.snapshotAt = new Date().toISOString();
+          current.snapshotMethod = 'browser';
+          if (info && info.title && (!current.title || current.title === hostname(current.url))) current.title = info.title;
+          store.save('links');
+          reindex();
+          log('[snapshot]', current.id, 'browser');
+        },
+      });
+      return sendJson(res, 202, { started: true, batch: st });
+    } catch (err) {
+      throw new HttpError(409, err.message);
+    }
+  }
+  if (p === '/api/snapshots/browser/stop' && method === 'POST') return sendJson(res, 200, { batch: browserbatch.stop() });
+  if (p === '/api/snapshots/browser' && method === 'GET') return sendJson(res, 200, { batch: browserbatch.status() });
+
+  // Wipe every link and its snapshots (and, on request, the folder list). Needs confirm: "DELETE".
+  if (p === '/api/links/delete-all' && method === 'POST') {
+    const body = await readJson(req);
+    if (body.confirm !== 'DELETE') throw new HttpError(400, 'send {"confirm":"DELETE"} to delete everything');
+    const n = store.links.length;
+    for (const l of store.links) snapshots.removeAll(l.id);
+    store.data.links = [];
+    store.save('links');
+    let foldersRemoved = 0;
+    if (body.folders) { foldersRemoved = store.folders.length; store.data.folders = []; store.save('folders'); }
+    reindex();
+    log('[links] deleted all', n, 'links', body.folders ? 'and folders' : '');
+    return sendJson(res, 200, { deleted: n, foldersRemoved });
   }
 
   if (seg[0] === 'api' && seg[1] === 'links' && seg[2]) {
@@ -428,6 +540,11 @@ async function route(req, res, url) {
       if (method === 'DELETE') { deleteLink(link); return sendJson(res, 200, { ok: true, id: link.id }); }
     }
     if (seg[3] === 'use' && method === 'POST') { recordUse(link); return sendJson(res, 200, { link: decorate(link) }); }
+    if (seg[3] === 'suggest' && method === 'GET') {
+      const sug = suggestFor(link.url, { title: link.title, selfId: link.id, existingTags: link.tags, currentFolder: link.folder });
+      if (link.keyword) sug.keywords = [];
+      return sendJson(res, 200, { suggest: sug });
+    }
     if (seg[3] === 'snapshot' && method === 'POST') {
       const body = await readJson(req);
       if (body.snapshot) {
@@ -445,7 +562,7 @@ async function route(req, res, url) {
         return sendJson(res, 200, { link: decorate(link) });
       }
       if (body.mode === 'browser') {
-        const cap = captureFromBrowser(link.url);
+        const cap = await captureFromBrowser(link.url);
         link.snapshot = snapshots.saveFromBase64(link.id, cap.buffer.toString('base64'));
         link.snapshotAt = new Date().toISOString();
         link.snapshotMethod = 'browser';
@@ -471,18 +588,26 @@ async function route(req, res, url) {
 
   // Screenshot of the browser window showing this url (active tab). Returns a data URL
   // the caller can send back as `snapshot` when saving.
+  // body.open: false keeps it to tabs that are already open (the Add page and the popup
+  // probe quietly while you type); the default opens the page in a tab when needed.
   if (p === '/api/capture' && method === 'POST') {
     const body = await readJson(req);
-    const cap = captureFromBrowser(body.url);
+    const cap = await captureFromBrowser(body.url, { open: body.open !== false });
     return sendJson(res, 200, { ok: true, app: cap.app, title: cap.title, method: cap.method, snapshot: 'data:image/jpeg;base64,' + cap.buffer.toString('base64') });
   }
 
+  // body: { url, fetch?, title?, page? } where page is the metadata the bookmarklet read
+  // inside the page. Returns page info plus `suggest` for folder, tags and keyword.
   if (p === '/api/enrich' && method === 'POST') {
     const body = await readJson(req);
     const info = await enrich(body.url, store.rules, { fetch: body.fetch !== false && body.noFetch !== true, timeoutMs: 8000 });
     if (info.error && !info.url) throw new HttpError(400, info.error);
     const dup = findDuplicate(info.url, null);
-    return sendJson(res, 200, { ...info, duplicate: dup ? decorate(dup) : null });
+    const page = body.page && typeof body.page === 'object' ? body.page : null;
+    const sug = suggestFor(info.url, { title: info.title || body.title || (page && page.title), page, existingTags: info.tags });
+    for (const t of info.suggestedTags || []) if (!sug.tags.some((x) => x.name === t) && !(info.tags || []).includes(t)) sug.tags.push({ name: t, why: 'site name' });
+    if (dup) sug.tags = sug.tags.filter((t) => !(dup.tags || []).includes(t.name));
+    return sendJson(res, 200, { ...info, duplicate: dup ? decorate(dup) : null, suggest: sug });
   }
 
   if (p === '/api/import/sources' && method === 'GET') return sendJson(res, 200, { sources: importer.availableSources() });
@@ -492,6 +617,26 @@ async function route(req, res, url) {
     try { loaded = importer.loadBookmarksFile(body.source || 'chrome', body.path, body.content); } catch (err) { throw new HttpError(400, err.message); }
     const items = importer.preview(loaded.items, store);
     return sendJson(res, 200, { source: body.source || 'file', path: loaded.path, total: items.length, duplicates: items.filter((i) => i.duplicate).length, items });
+  }
+  // Any supported file: Chrome Bookmarks JSON, Golinks JSON, bookmarks HTML, CSV, XLSX, Markdown, text.
+  // body: { name, content, encoding: "text" | "base64" }
+  if (p === '/api/import/file' && method === 'POST') {
+    const body = await readJson(req, 80 * 1024 * 1024);
+    const content = body.encoding === 'base64' ? Buffer.from(String(body.content || ''), 'base64') : String(body.content || '');
+    let loaded;
+    try { loaded = importer.loadAny(body.name || '', content); } catch (err) { throw new HttpError(400, err.message); }
+    const items = importer.preview(loaded.items, store);
+    return sendJson(res, 200, { source: loaded.format, format: loaded.format, name: body.name || '', total: items.length, duplicates: items.filter((i) => i.duplicate).length, items });
+  }
+  if (p === '/api/export' && method === 'GET') {
+    const format = param(url, 'format', 'json');
+    if (!exporter.FORMATS[format]) throw new HttpError(400, `unknown format "${format}"`);
+    const opts = { folder: folderParam(url), tag: param(url, 'tag', null) || null, version: VERSION };
+    const r = exporter.exportLinks(format, store.links, store.folders, opts);
+    if (url.searchParams.has('preview')) return sendJson(res, 200, { count: r.count, filename: r.filename, format });
+    res.writeHead(200, { 'content-type': r.mime, 'content-disposition': `attachment; filename="${r.filename}"`, 'cache-control': 'no-store' });
+    res.end(r.body);
+    return;
   }
   if (p === '/api/import/text' && method === 'POST') {
     const body = await readJson(req, 10 * 1024 * 1024);
@@ -506,16 +651,24 @@ async function route(req, res, url) {
     const skipped = [];
     for (const it of items) {
       try {
+        // keep a keyword from the file only when nothing here uses it yet
+        const kw = it.keyword && !store.findByKeyword(it.keyword) && !Object.keys(store.templates || {}).some((t) => t.toLowerCase() === String(it.keyword).toLowerCase()) ? it.keyword : null;
         const link = await createLink({
           url: it.url,
           title: it.title,
           tags: it.tags,
-          collection: it.collection,
+          folder: it.folder,
+          keyword: kw,
+          description: it.description,
+          notes: it.notes,
+          aliases: it.aliases,
           source: `import:${body.source || 'file'}`,
           enrich: false,
           snapshotMode: mode,
         });
-        if (it.added && Date.parse(it.added)) { link.created = it.added; }
+        if (it.added && Date.parse(it.added)) link.created = new Date(it.added).toISOString();
+        if (it.lastUsed && Date.parse(it.lastUsed)) link.lastUsed = new Date(it.lastUsed).toISOString();
+        if (Number(it.useCount) > 0) link.useCount = Number(it.useCount);
         added.push(link.id);
       } catch (err) {
         skipped.push({ url: it.url, reason: err.message });
@@ -567,6 +720,54 @@ async function route(req, res, url) {
       store.save('templates');
       return sendJson(res, 200, { templates: t });
     }
+  }
+  if (p === '/api/folders' && method === 'GET') return sendJson(res, 200, { folders: folders.listFolders(store.links, store.folders) });
+  if (p === '/api/folders' && method === 'POST') {
+    const body = await readJson(req);
+    const path = folders.normalizeFolder(body.path);
+    if (!path) throw new HttpError(400, 'path is required, for example "Work/Projects"');
+    const existed = Boolean(store.findFolder(path));
+    const created = setFolder(path);
+    return sendJson(res, existed ? 200 : 201, { folder: folders.listFolders(store.links, store.folders).find((f) => f.path === created), existed });
+  }
+  // Rename or move a folder: `to` is the complete new path, so "Work/A" -> "Archive/A" moves it.
+  if (p === '/api/folders/rename' && method === 'POST') {
+    const body = await readJson(req);
+    const from = folders.normalizeFolder(body.from);
+    const to = folders.normalizeFolder(body.to);
+    if (!from || !to) throw new HttpError(400, 'from and to are required');
+    if (folders.isWithin(to, from) && to.toLowerCase() !== from.toLowerCase()) throw new HttpError(400, 'cannot move a folder into itself');
+    const clash = store.findFolder(to);
+    if (clash && clash.path.toLowerCase() !== from.toLowerCase()) throw new HttpError(409, `folder "${clash.path}" already exists`);
+    let n = 0;
+    for (const l of store.links) {
+      if (!folders.isWithin(l.folder, from)) continue;
+      l.folder = folders.rebase(l.folder, from, to);
+      n++;
+    }
+    for (const f of store.folders) if (folders.isWithin(f.path, from)) f.path = folders.rebase(f.path, from, to);
+    store.ensureFolder(to);
+    store.save('folders'); store.save('links'); reindex();
+    return sendJson(res, 200, { from, to, changed: n });
+  }
+  // Delete a folder and its subfolders. links: "parent" (default) moves their links up one
+  // level, "root" unfiles them, "delete" removes the links too.
+  if (p === '/api/folders/delete' && method === 'POST') {
+    const body = await readJson(req);
+    const path = folders.normalizeFolder(body.path);
+    if (!path) throw new HttpError(400, 'path is required');
+    const mode = ['parent', 'root', 'delete'].includes(body.links) ? body.links : 'parent';
+    const parent = folders.parentOf(path);
+    let moved = 0, deleted = 0;
+    for (const l of [...store.links]) {
+      if (!folders.isWithin(l.folder, path)) continue;
+      if (mode === 'delete') { deleteLink(l); deleted++; continue; }
+      l.folder = mode === 'parent' ? parent : null;
+      moved++;
+    }
+    store.data.folders = store.folders.filter((f) => !folders.isWithin(f.path, path));
+    store.save('folders'); store.save('links'); reindex();
+    return sendJson(res, 200, { path, moved, deleted, parent });
   }
   if (p === '/api/tags/rename' && method === 'POST') {
     const body = await readJson(req);

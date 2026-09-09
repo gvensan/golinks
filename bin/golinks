@@ -1,5 +1,5 @@
 #!/bin/bash
-# golinks: control the Golinks service (a launchd login agent) and its menu bar icon.
+# golinks: control the Golinks service (a launchd login agent).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,7 +7,6 @@ LABEL="dev.golinks"
 OLD_LABELS=()
 AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$AGENTS/$LABEL.plist"
-MB_PLIST="$AGENTS/$LABEL.menubar.plist"
 DOMAIN="gui/$(id -u)"
 NODE_LINK="$ROOT/bin/node"
 STABLE_LINK="$HOME/.golinks"
@@ -85,9 +84,22 @@ migrate_old() {
       rm -f "$AGENTS/$l.plist"
       dim "removed old agent $l"
     fi
-    bootout_quiet "$l.menubar"; rm -f "$AGENTS/$l.menubar.plist"
   done
   [ -n "$OLD_STABLE_LINK" ] && [ -L "$OLD_STABLE_LINK" ] && rm -f "$OLD_STABLE_LINK" || true
+  remove_menubar
+}
+
+# Versions before 1.2 installed a menu bar icon as a second login agent. Remove it if present.
+remove_menubar() {
+  local l
+  for l in "$LABEL" ${OLD_LABELS[@]+"${OLD_LABELS[@]}"}; do
+    if loaded "$l.menubar" || [ -f "$AGENTS/$l.menubar.plist" ]; then
+      bootout_quiet "$l.menubar"
+      rm -f "$AGENTS/$l.menubar.plist"
+      dim "removed the menu bar icon agent $l.menubar"
+    fi
+  done
+  pkill -f "$ROOT/menubar/menubar.js" 2>/dev/null || true
 }
 
 do_install() {
@@ -99,13 +111,12 @@ do_install() {
   launchctl bootstrap "$DOMAIN" "$PLIST"
   launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
   green "service installed and started (runs at every login)"
-  if [ "${1:-}" != "--no-menubar" ]; then mb_install || dim "menu bar icon not installed (service still works)"; fi
   sleep 1
   do_status
 }
 
 do_uninstall() {
-  mb_uninstall
+  remove_menubar
   bootout_quiet "$LABEL"
   rm -f "$PLIST"
   [ -L "$STABLE_LINK" ] && rm -f "$STABLE_LINK"
@@ -140,7 +151,6 @@ do_status() {
   else
     echo "service:  not loaded"
   fi
-  if loaded "$LABEL.menubar"; then echo "menubar:  running"; else echo "menubar:  not running"; fi
   echo "url:      $BASE"
   if health="$(curl -fsS --max-time 2 "$BASE/api/health" 2>/dev/null)"; then
     echo "health:   $health"
@@ -164,7 +174,6 @@ do_doctor() {
   if [ -f "$PLIST" ]; then green "ok   agent plist: $PLIST"; else red "FAIL agent not installed, run golinks install"; fi
   if loaded "$LABEL"; then green "ok   agent loaded"; else red "FAIL agent not loaded, run golinks start"; fi
   if [ -L "$STABLE_LINK" ]; then green "ok   stable link: $STABLE_LINK -> $(readlink "$STABLE_LINK")"; else dim "     stable link ~/.golinks missing, run golinks install"; fi
-  if loaded "$LABEL.menubar"; then green "ok   menu bar icon running"; else dim "     menu bar icon not running (golinks menubar install)"; fi
   if ! curl -fsS --max-time 3 "$BASE/api/health" >/dev/null 2>&1; then
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then red "FAIL port $PORT is used by another process: $(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | tail -1 | awk '{print $1, $2}')"; else red "FAIL service not responding on $BASE (see golinks logs)"; fi
     return 1
@@ -192,19 +201,8 @@ do_update() {
   do_restart
 }
 
-# ---- menu bar icon (JXA status item, no app bundle) ----
-mb_install() {
-  render "$ROOT/launchd/$LABEL.menubar.plist.tmpl" "$MB_PLIST"
-  bootout_quiet "$LABEL.menubar"
-  launchctl bootstrap "$DOMAIN" "$MB_PLIST"
-  green "menu bar icon installed"
-}
-mb_uninstall() { bootout_quiet "$LABEL.menubar"; rm -f "$MB_PLIST"; echo "menu bar icon removed"; }
-mb_start() { [ -f "$MB_PLIST" ] || mb_install; if loaded "$LABEL.menubar"; then launchctl kickstart -k "$DOMAIN/$LABEL.menubar"; else launchctl bootstrap "$DOMAIN" "$MB_PLIST"; fi; echo "menu bar icon started"; }
-mb_stop() { bootout_quiet "$LABEL.menubar"; echo "menu bar icon stopped"; }
-
 case "${1:-}" in
-  install) do_install "${2:-}" ;;
+  install) do_install ;;
   uninstall) do_uninstall ;;
   start) do_start ;;
   stop) do_stop ;;
@@ -219,16 +217,10 @@ case "${1:-}" in
   search) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/search.js" "$@" ;;
   add-tab) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/add-current-tab.js" "$@" ;;
   service) shift; exec "$NODE_LINK" "$ROOT/shortcuts/scripts/service.js" "$@" ;;
-  menubar)
-    case "${2:-}" in
-      install) mb_install ;; uninstall) mb_uninstall ;; start) mb_start ;; stop) mb_stop ;;
-      status) if loaded "$LABEL.menubar"; then echo running; else echo stopped; fi ;;
-      *) echo "usage: golinks menubar install|uninstall|start|stop|status" ;;
-    esac ;;
   *)
     cat <<USAGE
 usage: golinks <command>
-  install [--no-menubar]  set up everything: node link, ~/.golinks link, login agent, menu bar icon
+  install                 set up everything: node link, ~/.golinks link, login agent
   uninstall               remove agents and links; your data stays
   start | stop | restart  control the service
   status                  pid, health, data location
@@ -238,10 +230,9 @@ usage: golinks <command>
   open                    open the web UI
   run                     run the server in the foreground
   node                    refresh bin/node after a node upgrade
-  search [words]          menu bar search (used by the Shortcut)
+  search [words]          search dialog (used by the Shortcut)
   add-tab                 save the current browser tab with a screenshot (used by the Shortcut)
-  service start|stop|toggle|status
-  menubar install|uninstall|start|stop|status
+  service start|stop|toggle|status   for Shortcuts that start or stop the service
 USAGE
     ;;
 esac

@@ -1,8 +1,9 @@
-# Hotkeys and menu bar
+# Hotkeys (optional)
 
-The menu bar icon (installed by `bin/golinks install`) already gives you search,
-add current tab, open, start and stop. Apple Shortcuts are only needed for
-**global hotkeys**, because a script cannot register system-wide keys.
+Everything works from the browser: the address bar go-links, the bookmarklet and
+the web UI. Apple Shortcuts add **global hotkeys** on top, for searching and
+saving the current tab from any app. Nothing is added to the menu bar unless
+you pin a Shortcut there yourself.
 
 ## The two Shortcuts
 
@@ -23,7 +24,7 @@ stable `~/.golinks` link, so they are identical on every machine.
 
 Build them once in the Shortcuts app: `+`, add "Run Shell Script", paste the
 command, name the Shortcut, open its details (`i`) and set the keyboard
-shortcut. "Pin in Menu Bar" is optional since the icon already exists.
+shortcut. "Pin in Menu Bar" in the same details pane is optional.
 
 ### Sharing the Shortcuts with colleagues
 
@@ -45,7 +46,7 @@ set the hotkeys themselves.
 | --- | --- |
 | `golinks search [words]` | Dialog asks for a query. Exact keyword or template opens at once, otherwise a pick list. Opens through `/open/:id` so use counts update. Offers to start the service if it is down. |
 | `golinks add-tab` | Reads the active tab of the frontmost browser (Chrome, Brave, Edge, Chromium, Safari), screenshots the window below the toolbar, asks for tags with rule suggestions, saves. For an already saved page it offers to refresh the snapshot. |
-| `golinks service start\|stop\|toggle\|status` | Used by the menu bar icon. |
+| `golinks service start\|stop\|toggle\|status` | For a Shortcut that starts or stops the service; shows a notification. |
 
 Flags for `add-tab`: `--no-shot`, `--no-ask`, `--revisit` (refresh the snapshot
 of an existing link and exit), `--app "Brave Browser"`. `LINKS_TOP_CROP`
@@ -53,9 +54,8 @@ of an existing link and exit), `--app "Brave Browser"`. `LINKS_TOP_CROP`
 
 ## Permissions
 
-The first run triggers macOS prompts for the process that runs the script:
-Shortcuts when started from a Shortcut, `osascript` when started from the menu
-bar icon.
+The first run triggers macOS prompts for the process that runs the script,
+which is Shortcuts.
 
 | Prompt | Where to check |
 | --- | --- |
