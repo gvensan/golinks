@@ -28,8 +28,17 @@ public sites, not real bookmarks.
   through an Apple Shortcut, saves the tab you are on. Screenshots come from your
   own browser window, so pages behind SSO look right.
 - **Search that understands your links.** Operators such as `tag:jira`,
-  `site:atlassian`, `in:work`, `unused:90d`, `added:7d`, `is:stale`. Initials
-  match, so `ep` finds "Event Portal design".
+  `site:atlassian`, `in:work`, `unused:90d`, `added:7d`, `is:stale`,
+  `is:broken`. Initials match, so `ep` finds "Event Portal design".
+- **Tidy up.** Links are checked in the background about once a week; pages
+  that answer 404 or fail twice in a row show up under **Broken links**, while
+  pages behind sign-in are left alone. **Duplicates** groups the same address,
+  the same page under a different query string, and the same title on the same
+  site, and merges them into one link. Deleted links wait in the **Trash** for
+  30 days with their snapshots, with Undo right after deleting.
+- **Select several links at once.** Hover a row for its checkbox, Shift+click
+  for a range, or press X, then move them to a folder, add or remove a tag,
+  check them, or delete them together.
 - **Folders and tags.** Nested folders (`Work/Projects/Alpha`), drag and drop,
   flat tags with automatic tagging rules from the URL.
 - **Suggestions while you save.** Folder, tag and keyword chips from the URL,
@@ -104,22 +113,24 @@ one-time steps, with the exact values to copy, a **Mark done** button on each,
 and a live permission check. Once the three required steps are done it drops
 out of the sidebar and stays reachable under Settings.
 
-1. **Service is running** (checked automatically). Version and port, started
-   at login by launchd.
-2. **Address bar go-links.** Add a site search in your browser with the name
-   `Go Links`, shortcut `:go` and URL `http://localhost:7777/go/%s`. The page
-   links to the right settings screen for Chrome, Brave and Edge and has a Copy
-   button for the URL. Safari has no site search; use the UI or the search
-   Shortcut there.
-3. **Bookmarklet.** Drag the "Add to Golinks" button to your bookmarks bar.
-4. **Allow screenshots of your browser.** macOS has to let the `node` process
-   read browser tabs (Automation, asked automatically on first use) and capture
-   the screen (Screen Recording, enabled by hand). The page shows the exact
-   path to add under System Settings > Privacy & Security > Screen & System
-   Audio Recording if `node` is not listed, then a **Re-check** button that runs
-   the doctor and ticks the step when both permissions pass. Run
-   `bin/golinks restart` after granting Screen Recording.
-5. **Import your bookmarks** (optional). Opens Settings > Import.
+1. **Golinks is running** (checked automatically). It starts on its own at
+   every login.
+2. **Open links from the address bar.** Numbered steps for Chrome, Brave and
+   Edge: paste the settings address, click Add under Site search, and fill in
+   the name `Go Links`, shortcut `:go` and URL `http://localhost:7777/go/%s`.
+   Every value has a Copy button. Safari has no site search; use the UI or the
+   search Shortcut there.
+3. **Save any page with one click.** Show the bookmarks bar (Cmd+Shift+B) and
+   drag the "Add to Golinks" button onto it. If dragging does not work, Copy
+   code and paste it into a new bookmark by hand; the page explains how.
+4. **Allow screenshots of your browser.** macOS has to let the service, listed
+   as `node`, read browser tabs (Automation, asked in a pop-up on first use) and
+   capture the screen (Screen Recording, turned on by hand). The page has
+   buttons that open the right System Settings pane, a Copy button for the path
+   to add if `node` is not listed, a **Restart Golinks** button (no Terminal
+   needed), a **Re-check** that ticks the step when both permissions pass, and
+   a **Test a screenshot** button.
+5. **Bring in your existing bookmarks** (optional). Opens Settings > Import.
 6. **Hotkeys** (optional, not on the page). Two Apple Shortcuts give you
    Ctrl+Option+L to search and Ctrl+Option+A to save the current tab from any
    app. See `shortcuts/README.md`.
@@ -330,6 +341,11 @@ GET  /go/:text                 omnibox redirect       GET  /open/:id           r
 GET  /api/health  /api/meta  /api/doctor
 GET  /api/search?q=&tag=&folder=&view=&limit=          folder= includes subfolders
 GET|POST /api/links            GET|PUT|DELETE /api/links/:id     POST /api/links/:id/use
+                               DELETE moves to the trash; DELETE ?permanent=1, POST /api/links/:id/purge remove for good
+POST /api/links/:id/restore    POST /api/links/:id/check (fetch now)     GET /api/trash    POST /api/trash/empty
+POST /api/links/bulk {ids, op: move|tag|untag|trash|restore|purge|check, folder?, tags?}
+GET  /api/check                POST /api/check {only: due|all|broken|unchecked} | {ids}     background dead link check
+GET  /api/duplicates           POST /api/duplicates/merge {keep, remove}     POST /api/duplicates/ignore {ids}
 POST /api/links/:id/snapshot   {snapshot: base64} | {imageUrl} | {mode:"browser"} | {mode:"tile"} | {}
 DELETE /api/links/:id/snapshot
 POST /api/capture {url}        screenshot of the browser window showing url (data URL)
@@ -342,6 +358,8 @@ POST /api/snapshots/refresh {only: missing|tiles|all}     queue background (head
 GET|POST /api/snapshots/browser {ids?|only}   POST /api/snapshots/browser/stop     capture through the user's browser
 POST /api/links/delete-all {confirm:"DELETE", folders?}   wipe every link and snapshot
 GET|PUT /api/settings /api/rules /api/templates      POST /api/tags/rename     GET /api/bookmarklet
+POST /api/restart              exit non-zero so launchd relaunches the service (replies {relaunch:false} when run by hand)
+POST /api/open-settings {pane: screen|automation}    open the System Settings privacy pane
 POST /quit
 ```
 
@@ -351,6 +369,13 @@ notes, folder ("Work/Projects"), snapshot (base64), snapshotUrl, snapshotMode
 `collection` name is still accepted for `folder`. Duplicates return 409 with
 the existing link. The service binds 127.0.0.1 only and rejects cross-origin
 writes.
+
+Search accepts `view=trash` and `view=broken` besides the usual views, and the
+flags `is:broken`, `is:unverified` (pages behind sign-in, which the server
+cannot verify) and `is:unchecked`. Each link carries `check` (`ok` true, false
+or null, `status`, `finalUrl`, `at`) once it has been checked, and `deleted`
+while it sits in the trash. Settings `trashDays` (30), `linkCheck` (true) and
+`checkDays` (7) control the housekeeping.
 
 ## Development
 

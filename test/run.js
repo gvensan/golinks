@@ -310,4 +310,103 @@ test('snapshots: tile svg escapes', () => {
   assert.ok(!svg.includes('<b>'));
 });
 
+test('store: live and trashed split, trashed keyword is released', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'links-trash-'));
+  fs.writeFileSync(path.join(dir, 'links.json'), JSON.stringify([
+    { id: 't1', url: 'https://a.com', title: 'A', keyword: 'aa', deleted: '2026-01-01T00:00:00Z' },
+    { id: 't2', url: 'https://b.com', title: 'B', keyword: 'bb' },
+  ]));
+  const s = new Store(dir);
+  s.loadAll();
+  assert.deepStrictEqual(s.live.map((l) => l.id), ['t2']);
+  assert.deepStrictEqual(s.trashed.map((l) => l.id), ['t1']);
+  assert.strictEqual(s.findByKeyword('aa'), null, 'a trashed link does not hold its keyword');
+  assert.strictEqual(s.findByKeyword('bb').id, 't2');
+  assert.strictEqual(s.settings.trashDays, 30);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('search: broken and unverified flags, views and sort', () => {
+  const now = new Date().toISOString();
+  const ls = [
+    { id: 'ok', url: 'https://x.com/ok', title: 'Fine page', tags: [], created: now, check: { ok: true, at: now } },
+    { id: 'bad', url: 'https://x.com/bad', title: 'Gone page', tags: [], created: now, check: { ok: false, at: now, status: 404 } },
+    { id: 'sso', url: 'https://x.com/sso', title: 'Login page', tags: [], created: now, check: { ok: null, at: now, reason: 'login' } },
+    { id: 'new', url: 'https://x.com/new', title: 'Unchecked page', tags: [], created: now },
+  ];
+  const idx = search.buildIndex(ls);
+  assert.deepStrictEqual(search.search(idx, 'is:broken').results.map((l) => l.id), ['bad']);
+  assert.deepStrictEqual(search.search(idx, 'is:unverified').results.map((l) => l.id), ['sso']);
+  assert.deepStrictEqual(search.search(idx, 'is:unchecked').results.map((l) => l.id), ['new']);
+  assert.deepStrictEqual(search.search(idx, '', { view: 'broken' }).results.map((l) => l.id), ['bad']);
+  assert.strictEqual(search.search(idx, 'page').results.length, 4, 'flags never hide results on their own');
+});
+
+const linkcheck = require('../lib/linkcheck');
+test('linkcheck: classification', () => {
+  const u = 'https://x.com/p';
+  assert.strictEqual(linkcheck.classify(u, { status: 200, finalUrl: u, html: '<title>Doc</title>' }).ok, true);
+  assert.strictEqual(linkcheck.classify(u, { status: 404, finalUrl: u, html: '' }).ok, false, '404 is broken at once');
+  assert.strictEqual(linkcheck.classify(u, { status: 410, finalUrl: u, html: '' }).reason, 'gone');
+  const first = linkcheck.classify(u, { status: 503, finalUrl: u, html: '' });
+  assert.strictEqual(first.ok, null, 'one server error is not yet broken');
+  assert.strictEqual(linkcheck.classify(u, { status: 503, finalUrl: u, html: '' }, null, first).ok, false, 'two in a row are');
+  const timeout = linkcheck.classify(u, null, Object.assign(new Error('aborted'), { name: 'AbortError' }));
+  assert.deepStrictEqual([timeout.ok, timeout.reason, timeout.fails], [null, 'timeout', 1]);
+  assert.strictEqual(linkcheck.classify(u, null, new Error('boom'), timeout).ok, false, 'second network failure is broken');
+  const login = linkcheck.classify(u, { status: 200, finalUrl: 'https://acme.okta.com/login/login.htm', html: '' });
+  assert.deepStrictEqual([login.ok, login.reason, login.redirected], [null, 'login', true], 'a sign-in redirect is never broken');
+  assert.strictEqual(linkcheck.classify(u, { status: 403, finalUrl: u, html: '' }).reason, 'auth');
+  const gh = linkcheck.classify('https://github.com/acme/private-repo', { status: 404, finalUrl: 'https://github.com/acme/private-repo', html: '' });
+  assert.deepStrictEqual([gh.ok, gh.reason], [null, 'private'], 'a 404 from GitHub may be a private repo');
+  assert.strictEqual(linkcheck.classify(u, { status: 429, finalUrl: u, html: '' }).reason, 'ratelimit');
+  const recovered = linkcheck.classify(u, { status: 200, finalUrl: u, html: '' }, null, { ok: false, fails: 3 });
+  assert.deepStrictEqual([recovered.ok, recovered.fails], [true, 0], 'a success resets the streak');
+  assert.ok(linkcheck.describe({ at: 'x', ok: false, status: 404, reason: 'gone' }).includes('404'));
+  assert.strictEqual(linkcheck.describe(null), 'not checked');
+});
+
+const dupes = require('../lib/dupes');
+test('dupes: exact, variant and title groups, ignore list, survivor pick', () => {
+  const ls = [
+    { id: 'a1', url: 'https://www.site.com/doc/', title: 'Design Notes for Alpha', tags: ['x'], useCount: 5, created: '2026-01-02T00:00:00Z' },
+    { id: 'a2', url: 'http://site.com/doc', title: 'Design Notes for Alpha', tags: ['y'], useCount: 1, created: '2026-01-01T00:00:00Z' },
+    { id: 'v1', url: 'https://site.com/page?tab=1', title: 'Page one', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 'v2', url: 'https://site.com/page?tab=2', title: 'Page two', tags: [], useCount: 2, created: '2026-01-01T00:00:00Z' },
+    { id: 't1', url: 'https://wiki.site.com/old/location', title: 'Quarterly planning guide', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 't2', url: 'https://wiki.site.com/new/location', title: 'Quarterly Planning Guide', tags: [], useCount: 0, created: '2026-02-01T00:00:00Z', snapshot: 'snapshots/t2.jpg', snapshotMethod: 'browser' },
+    { id: 'n1', url: 'https://other.com/a', title: 'Quarterly planning guide', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 'n2', url: 'https://other.com/b', title: 'Home', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 'n3', url: 'https://other.com/c', title: 'Home', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 'h1', url: 'https://acme.sharepoint.com/sites/A', title: 'acme.sharepoint.com', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+    { id: 'h2', url: 'https://acme.sharepoint.com/sites/B', title: 'acme.sharepoint.com', tags: [], useCount: 0, created: '2026-01-01T00:00:00Z' },
+  ];
+  const groups = dupes.findGroups(ls);
+  const byKind = Object.fromEntries(groups.map((g) => [g.kind, g]));
+  assert.strictEqual(groups.length, 3);
+  assert.deepStrictEqual(byKind.exact.ids, ['a1', 'a2'], 'most used link is the survivor');
+  assert.deepStrictEqual(byKind.variant.ids, ['v2', 'v1']);
+  assert.deepStrictEqual(byKind.title.ids, ['t2', 't1'], 'a real snapshot beats none when unused');
+  assert.ok(!groups.some((g) => g.ids.includes('n1')), 'same title on another site is not a duplicate');
+  assert.ok(!groups.some((g) => g.ids.includes('n2')), 'generic titles are ignored');
+  assert.ok(!groups.some((g) => g.ids.includes('h1')), 'a hostname used as the title is not a real title');
+  assert.strictEqual(dupes.findGroups(ls, [dupes.pairKey('a2', 'a1')]).length, 2, 'ignored pair hides its group');
+  const keep = { ...ls[0] };
+  const changed = dupes.mergeInto(keep, [ls[1], { id: 'z', title: 'Other name', tags: ['z'], aliases: ['zz'], keyword: 'kw', notes: 'note', useCount: 3, lastUsed: '2026-03-01T00:00:00Z' }]);
+  assert.deepStrictEqual(keep.tags, ['x', 'y', 'z']);
+  assert.deepStrictEqual(keep.aliases, ['zz', 'Other name']);
+  assert.strictEqual(keep.keyword, 'kw');
+  assert.strictEqual(keep.useCount, 9);
+  assert.strictEqual(keep.created, '2026-01-01T00:00:00Z');
+  assert.strictEqual(keep.lastUsed, '2026-03-01T00:00:00Z');
+  assert.ok(changed.includes('tags') && changed.includes('useCount'));
+});
+
+test('importer: preview reports which tags came from rules', () => {
+  const store = { links: [], rules: [{ match: 'atlassian\\.net/wiki', tags: ['confluence'] }] };
+  const p = importer.preview([{ url: 'https://acme.atlassian.net/wiki/x', title: 'W', folder: 'Docs', tags: ['mine'] }], store);
+  assert.deepStrictEqual(p[0].ruleTags, ['confluence']);
+  assert.deepStrictEqual(p[0].tags, ['mine', 'confluence']);
+});
+
 console.log(`${passed} tests passed${process.exitCode ? ', some failed' : ''}`);

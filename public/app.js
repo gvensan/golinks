@@ -24,6 +24,8 @@
     sideWidth: null, // px chosen by dragging the divider; null means size to content
     lastFolder: null, // folder most recently browsed; prefills the Add page
     down: false,
+    sel: new Set(), // ids picked for a bulk action (checkbox, Shift+click, X)
+    anchor: null, // index of the last picked row, for Shift+click ranges
   };
   const TOP_TAGS = 12;
   try { state.layout = localStorage.getItem('links.layout') || 'list'; } catch { /* ignore */ }
@@ -67,12 +69,20 @@
   }
 
   // ------------------------------------------------------------------ helpers
-  function toast(msg, ms) {
+  // action: { label, onClick } adds a button (used for Undo after a delete).
+  function toast(msg, ms, action) {
     const t = $('#toast');
     t.textContent = msg;
+    if (action) {
+      const b = document.createElement('button');
+      b.textContent = action.label;
+      b.onclick = () => { t.classList.remove('show'); clearTimeout(toast.timer); action.onClick(); };
+      t.appendChild(b);
+    }
+    t.classList.toggle('with-action', Boolean(action));
     t.classList.add('show');
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(() => t.classList.remove('show'), ms || 2200);
+    toast.timer = setTimeout(() => t.classList.remove('show'), ms || (action ? 7000 : 2200));
   }
 
   function rel(iso) {
@@ -147,7 +157,7 @@
       const ok = () => {
         if (!withInput) return done(withCheck ? { ok: true, checked: check.checked } : true);
         const v = input.value.trim();
-        const bad = !v || (opts.validate && opts.validate(v));
+        const bad = (!v && !opts.allowEmpty) || (opts.validate && opts.validate(v));
         if (bad) { input.focus(); input.classList.add('invalid'); if (typeof bad === 'string') toast(bad, 2500); return; }
         done(withCheck ? { value: v, checked: check.checked } : v);
       };
@@ -201,8 +211,10 @@
     if (head === 'tag' && val) r.tag = val;
     else if ((head === 'folder' || head === 'col') && val) r.folder = val.replace(/^\/+|\/+$/g, '');
     else if (head === 'view' && val) r.view = val;
+    else if (head === 'trash') r.view = 'trash';
     else if (head === 'link' && val) r.linkId = val;
     else if (head === 'add') r.page = 'add';
+    else if (head === 'duplicates') r.page = 'duplicates';
     else if (head === 'settings') { r.page = 'settings'; r.tab = ['general', 'setup', 'import', 'export'].includes(rest[0]) ? rest[0] : 'general'; }
     else if (head === 'setup' || head === 'import' || head === 'export') { r.page = 'settings'; r.tab = head; }
     return r;
@@ -214,6 +226,7 @@
 
   async function onRoute() {
     state.route = parseHash();
+    clearSelection(false);
     if (state.route.folder) state.lastFolder = state.route.folder;
     if (state.route.page !== 'links' && $('#drawer').classList.contains('open')) closeDrawer();
     if (state.route.page === 'links') {
@@ -224,6 +237,7 @@
         if (link) openDrawer(link);
       }
     } else if (state.route.page === 'add') renderAddPage();
+    else if (state.route.page === 'duplicates') renderDuplicatesPage();
     else if (state.route.page === 'settings') renderSettingsPage(state.route.tab);
     renderSidebar();
     $('#fab').classList.toggle('hidden', state.route.page === 'add');
@@ -250,6 +264,10 @@
     import: svg('<path d="M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 12.5h10"/>'),
     export: svg('<path d="M8 10.5V3M4.8 6 8 2.8 11.2 6M3 12.5h10"/>'),
     restart: svg('<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/>'),
+    broken: svg('<path d="M6.5 9.5 4.8 11.2a2.4 2.4 0 0 1-3.4-3.4L4 5.2M9.5 6.5l1.7-1.7a2.4 2.4 0 0 1 3.4 3.4L12 10.8M2.5 2.5l2 2M11.5 11.5l2 2M6.2 6.2l3.6 3.6"/>'),
+    duplicates: svg('<rect x="2.5" y="2.5" width="8" height="8" rx="1.5"/><path d="M5.5 13.5h6.5a1.5 1.5 0 0 0 1.5-1.5V5.5"/>'),
+    trash: svg('<path d="M3 4.5h10M6.5 4.5v-1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8M6.8 7v4M9.2 7v4"/>'),
+    check: svg('<path d="M2.5 8.5 6 12l7.5-8"/>'),
   };
 
   function navItem(hash, label, count, ico, active) {
@@ -305,10 +323,22 @@
       if (c.unfiled != null && folderCount) html += '<div class="nav">' + navItem('#/view/unfiled', 'Unfiled', c.unfiled, NAV_ICONS.unfiled, r.view === 'unfiled').replace('<a ', '<a data-drop-folder="" ') + '</div>';
     }
 
+    // Housekeeping views: links that no longer load, probable duplicates, and the trash.
+    const tidyCount = (c.broken || 0) + (c.duplicates || 0) + (c.trash || 0);
+    html += section('tidy', 'Tidy up', tidyCount, '');
+    if (!state.collapsed.has('tidy')) {
+      html += '<div class="nav">';
+      html += navItem('#/view/broken', 'Broken links', c.broken, NAV_ICONS.broken, r.view === 'broken');
+      html += navItem('#/duplicates', 'Duplicates', c.duplicates, NAV_ICONS.duplicates, r.page === 'duplicates');
+      html += navItem('#/view/trash', 'Trash', c.trash, NAV_ICONS.trash, r.view === 'trash');
+      html += '</div>';
+    }
+
     html += '<div class="spacer"></div><div class="nav foot">';
     if (m && m.restartNeeded) html += '<a href="#/settings" class="restart-note" title="The code on disk is newer than the running service">' + NAV_ICONS.restart + ' restart needed</a>';
     if (m && m.pendingSnapshots.length) html += '<div class="side-progress" title="Snapshots are captured one at a time in the background"><span class="spin"></span> capturing ' + m.pendingSnapshots.length + ' snapshot' + (m.pendingSnapshots.length === 1 ? '' : 's') + '</div>';
     if (m && m.browserBatch && m.browserBatch.running) html += '<a href="#/settings" class="side-progress" title="Your browser is opening each page to take its screenshot. Stop it from Settings."><span class="spin"></span> browser capture ' + m.browserBatch.done + '/' + m.browserBatch.total + '</a>';
+    if (m && m.check && m.check.running) html += '<a href="#/view/broken" class="side-progress" title="Checking whether links still load, a few at a time"><span class="spin"></span> checking links ' + m.check.done + '/' + m.check.total + '</a>';
     // The checklist entry disappears once the required steps are done; it stays reachable in Settings.
     if (!m || !m.setupComplete) html += navItem('#/settings/setup', 'Setup checklist', null, NAV_ICONS.setup, r.page === 'settings' && r.tab === 'setup');
     html += navItem('#/settings', 'Settings', null, NAV_ICONS.settings, r.page === 'settings' && r.tab !== 'setup');
@@ -499,26 +529,52 @@
     document.title = (r.tag ? '#' + r.tag : r.folder ? r.folder : r.view ? r.view : 'Golinks') + (r.tag || r.folder || r.view ? ' | Golinks' : '');
   }
 
+  const VIEW_LABELS = { trash: 'Trash', broken: 'Broken links', recent: 'Recent', mostused: 'Most used', keywords: 'Go keywords', untagged: 'Untagged', stale: 'Stale', unfiled: 'Unfiled', added: 'Just added' };
+  const inTrash = () => state.route.view === 'trash';
+
   function renderToolbar() {
     const r = state.route;
+    document.body.classList.toggle('has-selection', state.sel.size > 0);
     if (r.page !== 'links') { $('#toolbar').innerHTML = ''; return; }
+    const tb = $('#toolbar');
+    if (state.sel.size) { renderBulkToolbar(tb); return; }
     let html = '<span>' + state.total + ' link' + (state.total === 1 ? '' : 's') + '</span>';
     if (r.tag) html += '<span class="chip filter">tag: ' + esc(r.tag) + ' <button data-clear title="clear">&times;</button></span>';
     if (r.folder) {
       const segs = folderSegments(r.folder);
       html += '<span class="chip filter crumbs">' + FOLDER_ICO + segs.map((seg, i) => '<a href="' + folderHash(segs.slice(0, i + 1).join('/')) + '"' + (i === segs.length - 1 ? ' class="cur"' : '') + '>' + esc(seg) + '</a>').join('<span class="sep">/</span>') + ' <button data-clear title="clear">&times;</button></span>';
     }
-    if (r.view) html += '<span class="chip filter">' + esc(r.view) + ' <button data-clear title="clear">&times;</button></span>';
+    if (r.view) html += '<span class="chip filter">' + esc(VIEW_LABELS[r.view] || r.view) + ' <button data-clear title="clear">&times;</button></span>';
     if (r.folder && state.results.length) html += '<button class="btn sm" id="openAll">Open all</button><button class="btn sm" id="copyAll">Copy all URLs</button>';
     if (r.folder) html += '<button class="btn sm ghost" id="subFolder" title="Create a folder inside this one">Subfolder</button><button class="btn sm ghost" id="renameFolder" title="Rename or move this folder">Rename</button><button class="btn sm ghost danger" id="deleteFolder" title="Delete this folder and its subfolders; links move to the parent">Delete folder</button>';
     if (r.tag) html += '<button class="btn sm ghost" id="renameTag">Rename tag</button>';
+    if (r.view === 'trash') {
+      const days = state.meta ? state.meta.settings.trashDays || 30 : 30;
+      html += '<span class="small muted">Links here are removed for good after ' + days + ' days. Restore brings one back with its snapshot.</span>';
+      if (state.results.length) html += '<button class="btn sm ghost danger" id="emptyTrash" title="Remove every link in the trash permanently">Empty trash</button>';
+    }
+    if (r.view === 'broken') {
+      const c = state.meta ? state.meta.check : null;
+      html += '<span class="small muted" title="A link is broken after a 404 or 410, or after two failed attempts in a row. Pages behind sign-in are never marked broken.">' + (c && c.running ? '<span class="spin"></span> checking ' + c.done + ' of ' + c.total : c && c.finishedAt ? 'last check ' + rel(c.finishedAt) : 'not checked yet') + '</span>';
+      html += '<button class="btn sm" id="recheckBroken" title="Check every link that is marked broken again">Re-check these</button><button class="btn sm ghost" id="checkAll" title="Check every link now">Check all links</button>';
+    }
     html += '<span class="grow"></span>';
-    html += '<span class="small muted"><kbd>&uarr;&darr;</kbd> move <kbd>&#8629;</kbd> open <kbd>&#8984;&#8629;</kbd> copy <kbd>E</kbd> edit</span>';
+    html += '<span class="small muted"><kbd>&uarr;&darr;</kbd> move <kbd>&#8629;</kbd> open <kbd>&#8984;&#8629;</kbd> copy <kbd>E</kbd> edit <kbd>X</kbd> select</span>';
     html += '<div class="seg"><button data-layout="list" class="' + (state.layout === 'list' ? 'on' : '') + '" title="List">&#9776; List</button><button data-layout="grid" class="' + (state.layout === 'grid' ? 'on' : '') + '" title="Grid">&#9638; Grid</button></div>';
-    const tb = $('#toolbar');
     tb.innerHTML = html;
     $$('[data-clear]', tb).forEach((b) => (b.onclick = () => go('#/')));
     $$('[data-layout]', tb).forEach((b) => (b.onclick = () => { state.layout = b.dataset.layout; try { localStorage.setItem('links.layout', state.layout); } catch { /* ignore */ } renderResults(); renderToolbar(); }));
+    const et = $('#emptyTrash');
+    if (et) et.onclick = async () => {
+      const n = state.total;
+      const ok = await dialog({ input: false, ok: 'Empty trash', danger: true, title: 'Empty the trash?', message: n + ' link' + (n === 1 ? '' : 's') + ' and ' + (n === 1 ? 'its snapshot' : 'their snapshots') + ' are removed permanently. This cannot be undone.' });
+      if (!ok) return;
+      try { const r = await api('POST', '/api/trash/empty'); toast('Trash emptied, ' + r.deleted + ' removed'); await refreshAll(); } catch (err) { toast(err.message, 4000); }
+    };
+    const rb = $('#recheckBroken');
+    if (rb) rb.onclick = () => startCheck('broken');
+    const ca2 = $('#checkAll');
+    if (ca2) ca2.onclick = () => startCheck('all');
     const oa = $('#openAll');
     if (oa) oa.onclick = () => {
       let n = 0;
@@ -543,6 +599,131 @@
       await loadMeta();
       go('#/tag/' + encodeURIComponent(slugTag(to)));
     };
+  }
+
+  // ---- selection and bulk actions
+  function clearSelection(render) {
+    if (!state.sel.size && state.anchor == null) return;
+    state.sel.clear();
+    state.anchor = null;
+    if (render !== false) { $$('.picked', $('#content')).forEach((el) => el.classList.remove('picked')); renderToolbar(); }
+  }
+
+  // Toggle one row; with Shift, every row between the last picked one and this one joins.
+  function togglePick(i, shift) {
+    const link = state.results[i];
+    if (!link) return;
+    if (shift && state.anchor != null) {
+      const [a, b] = [Math.min(state.anchor, i), Math.max(state.anchor, i)];
+      const on = !state.sel.has(link.id);
+      for (let k = a; k <= b; k++) { if (on) state.sel.add(state.results[k].id); else state.sel.delete(state.results[k].id); }
+    } else if (state.sel.has(link.id)) state.sel.delete(link.id);
+    else state.sel.add(link.id);
+    state.anchor = i;
+    syncPicked();
+    renderToolbar();
+  }
+
+  function syncPicked() {
+    $$('.row, .card', $('#content')).forEach((el) => {
+      const on = state.sel.has(el.dataset.id);
+      el.classList.toggle('picked', on);
+      const p = $('.pick', el);
+      if (p) p.setAttribute('aria-checked', String(on));
+    });
+  }
+
+  function selectAllVisible() {
+    for (const l of state.results) state.sel.add(l.id);
+    if (state.results.length) state.anchor = state.results.length - 1;
+    syncPicked();
+    renderToolbar();
+  }
+
+  function renderBulkToolbar(tb) {
+    const n = state.sel.size;
+    const trash = inTrash();
+    let html = '<b>' + n + ' selected</b>';
+    if (trash) {
+      html += '<button class="btn sm primary" data-bulk="restore" title="Bring the selected links back">Restore</button>';
+      html += '<button class="btn sm ghost danger" data-bulk="purge" title="Remove the selected links permanently">Delete forever</button>';
+    } else {
+      html += '<button class="btn sm" data-bulk="move" title="Move the selected links to a folder">Move to folder</button>';
+      html += '<button class="btn sm" data-bulk="tag" title="Add a tag to the selected links">Add tag</button>';
+      html += '<button class="btn sm" data-bulk="untag" title="Remove a tag from the selected links">Remove tag</button>';
+      html += '<button class="btn sm ghost" data-bulk="check" title="Check whether the selected links still load">Check</button>';
+      html += '<button class="btn sm ghost danger" data-bulk="trash" title="Move the selected links to the trash">Delete</button>';
+    }
+    html += '<span class="grow"></span>';
+    if (n < state.results.length) html += '<button class="btn sm ghost" id="pickAll">Select all ' + state.results.length + '</button>';
+    html += '<button class="btn sm ghost" id="pickNone" title="Clear the selection (Esc)">Clear</button>';
+    tb.innerHTML = html;
+    $$('[data-bulk]', tb).forEach((b) => (b.onclick = () => bulkAction(b.dataset.bulk, b)));
+    const pa = $('#pickAll');
+    if (pa) pa.onclick = selectAllVisible;
+    $('#pickNone').onclick = () => clearSelection();
+  }
+
+  const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+  async function bulkAction(op, button) {
+    const ids = [...state.sel];
+    const n = ids.length;
+    const picked = state.results.filter((l) => state.sel.has(l.id));
+    const body = { ids, op };
+    if (op === 'move') {
+      const folder = await dialog({ title: 'Move ' + plural(n, 'link') + ' to', value: state.route.folder || '', placeholder: 'Work/Projects', ok: 'Move', list: state.meta ? state.meta.folders.map((f) => f.path) : [], help: 'Type a folder path; a new one is created. Leave the field empty to move the links out of their folders.', allowEmpty: true });
+      if (folder == null) return;
+      body.folder = folder;
+    } else if (op === 'tag') {
+      const tag = await dialog({ title: 'Add a tag to ' + plural(n, 'link'), placeholder: 'tag name', ok: 'Add', list: state.meta ? state.meta.tags.map((t) => t.name) : [], help: 'Lower-case letters, digits, dots and dashes. Several tags: separate them with commas.' });
+      if (!tag) return;
+      body.tags = tag;
+    } else if (op === 'untag') {
+      const present = [...new Set(picked.flatMap((l) => l.tags || []))].sort();
+      if (!present.length) { toast('The selected links have no tags'); return; }
+      const tag = await dialog({ title: 'Remove a tag from ' + plural(n, 'link'), placeholder: present[0], ok: 'Remove', list: present, help: 'Tags on the selection: ' + present.map((t) => '<code>' + esc(t) + '</code>').join(' ') });
+      if (!tag) return;
+      body.tags = tag;
+    } else if (op === 'purge') {
+      const ok = await dialog({ input: false, danger: true, ok: 'Delete forever', title: 'Delete ' + plural(n, 'link') + ' permanently?', message: 'The links and their snapshots are removed for good. This cannot be undone.' });
+      if (!ok) return;
+    }
+    if (button) button.disabled = true;
+    try {
+      const r = await api('POST', '/api/links/bulk', body);
+      const skipped = r.skipped.length ? ', ' + plural(r.skipped.length, 'skipped') + ' (' + esc(r.skipped[0].reason) + ')' : '';
+      const undoTrash = op === 'trash' && r.changed ? { label: 'Undo', onClick: () => bulkRestore(ids) } : null;
+      const msg = op === 'move' ? (body.folder ? 'Moved ' + plural(r.changed, 'link') + ' to ' + body.folder : 'Moved ' + plural(r.changed, 'link') + ' out of their folders')
+        : op === 'tag' ? 'Tagged ' + plural(r.changed, 'link')
+        : op === 'untag' ? 'Removed the tag from ' + plural(r.changed, 'link')
+        : op === 'trash' ? 'Moved ' + plural(r.changed, 'link') + ' to the trash'
+        : op === 'restore' ? 'Restored ' + plural(r.changed, 'link')
+        : op === 'purge' ? 'Deleted ' + plural(r.changed, 'link') + ' permanently'
+        : 'Checking ' + plural(r.changed, 'link') + ' in the background';
+      clearSelection(false);
+      toast(msg + skipped, undoTrash ? 7000 : 3000, undoTrash);
+      await refreshAll();
+    } catch (err) {
+      toast(err.message, 4000);
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function bulkRestore(ids) {
+    try {
+      const r = await api('POST', '/api/links/bulk', { ids, op: 'restore' });
+      toast('Restored ' + plural(r.changed, 'link') + (r.skipped.length ? ', ' + r.skipped.length + ' could not be restored' : ''));
+      await refreshAll();
+    } catch (err) { toast(err.message, 4000); }
+  }
+
+  async function startCheck(only) {
+    try {
+      const r = await api('POST', '/api/check', { only });
+      toast(r.queued ? 'Checking ' + plural(r.queued, 'link') + ' in the background' : 'Nothing to check');
+      await loadMeta(); renderSidebar(); renderToolbar();
+    } catch (err) { toast(err.message, 4000); }
   }
 
   let searchTimer = null;
@@ -570,46 +751,69 @@
     state.total = data.total;
     state.terms = data.parsed.terms;
     state.selected = 0;
+    // picked links that dropped out of the results (moved, trashed) leave the selection
+    if (state.sel.size) { const ids = new Set(state.results.map((l) => l.id)); for (const id of [...state.sel]) if (!ids.has(id)) state.sel.delete(id); }
     renderToolbar();
     renderResults();
   }
+
+  // Row and card badges: broken after a failed check, stale by age.
+  function statusBadges(l, cls) {
+    let html = '';
+    if (l.check && l.check.ok === false) html += ' <span class="' + cls + ' danger" title="' + esc(l.checkLabel || 'broken') + ', checked ' + rel(l.check.at) + '">broken</span>';
+    if (l.stale && !inTrash()) html += ' <span class="' + cls + ' warn">stale</span>';
+    return html;
+  }
+
+  function rowActions(l) {
+    if (inTrash()) return '<div class="acts"><button class="btn sm primary" data-restore title="Bring this link back">Restore</button><button class="btn sm ghost danger" data-purge title="Remove permanently (click twice)">Delete forever</button></div>';
+    return '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-copy title="Copy URL (C)">Copy</button><button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
+  }
+
+  const pickBox = (l) => '<span class="pick" data-pick role="checkbox" aria-checked="' + state.sel.has(l.id) + '" title="Select (X). Shift+click selects a range"></span>';
 
   function renderResults() {
     const c = $('#content');
     if (!state.results.length) {
       const r = state.route;
-      c.innerHTML = '<div class="empty"><b>' + (state.q ? 'No matches for "' + esc(state.q) + '"' : r.folder ? 'Empty folder' : 'Nothing here yet') + '</b>' +
-        (state.q ? 'Try fewer words, or operators like <code>tag:jira</code>, <code>in:work</code>, <code>site:atlassian</code>, <code>unused:90d</code>.'
+      c.innerHTML = '<div class="empty"><b>' + (state.q ? 'No matches for "' + esc(state.q) + '"' : r.view === 'trash' ? 'The trash is empty' : r.view === 'broken' ? 'No broken links' : r.folder ? 'Empty folder' : 'Nothing here yet') + '</b>' +
+        (state.q ? 'Try fewer words, or operators like <code>tag:jira</code>, <code>in:work</code>, <code>site:atlassian</code>, <code>unused:90d</code>, <code>is:broken</code>.'
+          : r.view === 'trash' ? 'Deleted links wait here for ' + (state.meta ? state.meta.settings.trashDays || 30 : 30) + ' days before they are removed for good.'
+          : r.view === 'broken' ? 'Links that answer 404 or 410, or fail twice in a row, show up here. ' + (state.meta && state.meta.check && state.meta.check.finishedAt ? 'Last check ' + rel(state.meta.check.finishedAt) + '.' : 'Links are checked in the background about once a week.') + ' <a href="#" id="checkNow">Check all links now</a>.'
           : r.folder ? 'Move links here from their edit drawer (Folder field), or <a href="#/add">add a link</a> and set its folder to <code>' + esc(r.folder) + '</code>.'
           : 'Add a link with the Shortcut, the bookmarklet, or <a href="#/add">Add link</a>. Or <a href="#/settings/import">import</a> your bookmarks.') +
         '</div>';
+      const cn = $('#checkNow');
+      if (cn) cn.onclick = (e) => { e.preventDefault(); startCheck('all'); };
       return;
     }
     const terms = state.terms;
+    const trash = inTrash();
+    const when = (l) => trash ? 'deleted ' + rel(l.deleted) : l.lastUsed ? 'used ' + rel(l.lastUsed) : 'added ' + rel(l.created);
     if (state.layout === 'grid') {
       c.innerHTML = '<div class="grid">' + state.results.map((l, i) => {
         const shot = l.snapshot ? '<img src="' + esc(snapshotUrl(l)) + '" alt="" loading="lazy" draggable="false">' : tileHtml(l, 'none');
-        return '<div class="card' + (i === state.selected ? ' selected' : '') + '" data-i="' + i + '" data-id="' + esc(l.id) + '" draggable="true">' +
-          '<div class="shot">' + shot + (l.snapshotPending ? '<span class="pend spin"></span>' : '') + (l.snapshotStale ? '<span class="pend badge warn">old snapshot</span>' : '') + '</div>' +
+        return '<div class="card' + (i === state.selected ? ' selected' : '') + (state.sel.has(l.id) ? ' picked' : '') + '" data-i="' + i + '" data-id="' + esc(l.id) + '" draggable="' + (trash ? 'false' : 'true') + '">' +
+          '<div class="shot">' + shot + pickBox(l) + (l.snapshotPending ? '<span class="pend spin"></span>' : '') + (l.snapshotStale && !trash ? '<span class="pend badge warn">old snapshot</span>' : '') + '</div>' +
           '<div class="body"><div class="title" title="' + esc(l.title) + '">' + hl(l.title, terms) + '</div>' +
           (blurb(l) ? '<div class="desc" title="' + esc(blurb(l)) + '">' + hl(blurb(l), terms) + '</div>' : '') +
           '<div class="host">' + (l.keyword ? '<span class="chip kw">go ' + esc(l.keyword) + '</span>' : '') + '<span class="h" title="' + esc(l.url) + '">' + esc(host(l.url)) + '</span></div>' +
           (l.folder ? '<div class="host folder"><a class="fpath" href="' + folderHash(l.folder) + '" title="' + esc(l.folder) + '">' + FOLDER_ICO + '<span class="fl">' + esc(folderSegments(l.folder).join(' / ')) + '</span></a></div>' : '') +
           (l.tags.length ? '<div class="tags">' + l.tags.map((t) => '<span class="chip">' + hl(t, terms) + '</span>').join('') + '</div>' : '') +
-          '<div class="meta"><span>' + (l.lastUsed ? 'used ' + rel(l.lastUsed) : 'added ' + rel(l.created)) + '</span><span>' + (l.useCount ? l.useCount + ' open' + (l.useCount === 1 ? '' : 's') : '') + (l.stale ? ' <span class="badge warn">stale</span>' : '') + '</span></div>' +
-          '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-copy title="Copy URL (C)">Copy</button><button class="btn sm ghost danger" data-del title="Delete (click twice)">Delete</button></div>' +
+          '<div class="meta"><span>' + when(l) + '</span><span>' + (l.useCount ? l.useCount + ' open' + (l.useCount === 1 ? '' : 's') : '') + statusBadges(l, 'badge') + '</span></div>' +
+          rowActions(l) +
           '</div></div>';
       }).join('') + '</div>';
     } else {
       c.innerHTML = '<div class="list">' + state.results.map((l, i) => {
         const shot = l.snapshot ? '<img class="thumb" src="' + esc(snapshotUrl(l)) + '" alt="" loading="lazy" draggable="false">' : tileHtml(l, 'thumb none');
-        return '<div class="row' + (i === state.selected ? ' selected' : '') + '" data-i="' + i + '" data-id="' + esc(l.id) + '" draggable="true">' + shot +
-          '<div class="main"><div class="title"><span class="t" title="' + esc(l.title) + '">' + hl(l.title, terms) + '</span>' + (l.keyword ? '<span class="chip kw">go ' + esc(l.keyword) + '</span>' : '') + (l.snapshotPending ? '<span class="spin" title="capturing snapshot"></span>' : '') + '</div>' +
+        return '<div class="row' + (i === state.selected ? ' selected' : '') + (state.sel.has(l.id) ? ' picked' : '') + '" data-i="' + i + '" data-id="' + esc(l.id) + '" draggable="' + (trash ? 'false' : 'true') + '">' + pickBox(l) + shot +
+          '<div class="main"><div class="title"><span class="t" title="' + esc(l.title) + '">' + hl(l.title, terms) + '</span>' + (l.keyword ? '<span class="chip kw">go ' + esc(l.keyword) + '</span>' : '') + (l.snapshotPending ? '<span class="spin" title="capturing snapshot"></span>' : '') + (l.checkPending ? '<span class="spin" title="checking the link"></span>' : '') + '</div>' +
           (blurb(l) ? '<div class="desc" title="' + esc(blurb(l)) + '">' + hl(blurb(l), terms) + '</div>' : '') +
           '<div class="sub"><span class="host" title="' + esc(l.url) + '">' + esc(host(l.url)) + '</span>' + (l.folder ? '<span class="sep"></span><a class="fpath" href="' + folderHash(l.folder) + '" title="' + esc(l.folder) + '">' + FOLDER_ICO + '<span class="fl">' + esc(l.folder) + '</span></a>' : '') +
           (l.tags.length ? '<span class="sep"></span><span class="tags">' + l.tags.map((t) => '<span class="chip">' + hl(t, terms) + '</span>').join('') + '</span>' : '') + '</div></div>' +
-          '<div class="right"><div>' + (l.lastUsed ? 'used ' + rel(l.lastUsed) : 'added ' + rel(l.created)) + '</div><div>' + (l.useCount ? l.useCount + ' open' + (l.useCount === 1 ? '' : 's') : '') + (l.stale ? ' <span class="stale">stale</span>' : '') + '</div></div>' +
-          '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-copy title="Copy URL (C)">Copy</button><button class="btn sm ghost danger" data-del title="Delete (click twice)">Delete</button></div>' +
+          '<div class="right"><div>' + when(l) + '</div><div>' + (l.useCount ? l.useCount + ' open' + (l.useCount === 1 ? '' : 's') : '') + statusBadges(l, 'badge') + '</div></div>' +
+          rowActions(l) +
           '</div>';
       }).join('') + '</div>';
     }
@@ -663,11 +867,16 @@
     if (!item) return;
     const i = Number(item.dataset.i);
     if (e.target.closest('a.fpath')) return; // folder breadcrumb: let the hash change
+    if (e.target.closest('[data-pick]') || e.shiftKey) { e.preventDefault(); togglePick(i, e.shiftKey); select(i); return; }
     select(i);
     if (e.target.closest('[data-edit]')) { openDrawer(state.results[i]); return; }
     if (e.target.closest('[data-copy]')) { copy(state.results[i].url, 'URL copied'); return; }
     const del = e.target.closest('[data-del]');
     if (del) { confirmDelete(del, state.results[i]); return; }
+    const restore = e.target.closest('[data-restore]');
+    if (restore) { restoreOne(state.results[i]); return; }
+    const purge = e.target.closest('[data-purge]');
+    if (purge) { confirmPurge(purge, state.results[i]); return; }
     if (e.metaKey || e.ctrlKey) { copy(state.results[i].url, 'URL copied'); return; }
     if (e.altKey) { openDrawer(state.results[i]); return; }
     openLink(state.results[i]);
@@ -690,7 +899,13 @@
   let hoverTimer = null;
   $('#content').addEventListener('dragstart', (e) => {
     const item = e.target.closest('.row, .card');
-    if (!item) { e.preventDefault(); return; }
+    if (!item) {
+      // Real links (the bookmarklet button on the Settings pages) keep the browser's
+      // native drag so they can be dropped on the bookmarks bar; stray text or image
+      // drags from other content are cancelled.
+      if (!e.target.closest('a[href]')) e.preventDefault();
+      return;
+    }
     dragId = item.dataset.id;
     const link = state.results.find((l) => l.id === dragId);
     e.dataTransfer.effectAllowed = 'move';
@@ -844,10 +1059,12 @@
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); if (state.route.page !== 'links') go('#/'); const q = $('#q'); q.focus(); q.select(); return; }
     if (e.key === 'Escape') {
       if ($('#drawer').classList.contains('open')) { closeDrawer(); return; }
+      if (state.sel.size && !inField) { clearSelection(); return; }
       if (inSearch && $('#q').value) { $('#q').value = ''; scheduleSearch(); return; }
       if (inField) e.target.blur();
       return;
     }
+    if (mod && e.key.toLowerCase() === 'a' && !inField && state.route.page === 'links' && state.results.length) { e.preventDefault(); selectAllVisible(); return; }
     if (mod && e.key.toLowerCase() === 's' && $('#drawer').classList.contains('open')) { e.preventDefault(); saveDrawer(); return; }
     if (mod && e.key === 'Enter' && $('#drawer').classList.contains('open')) { e.preventDefault(); saveDrawer(); return; }
     if (inField && !inSearch) return;
@@ -864,6 +1081,7 @@
       else openLink(l);
     } else if (!inField) {
       if (e.key === 'e') { e.preventDefault(); openDrawer(selectedLink()); }
+      else if (e.key === 'x') { e.preventDefault(); if (state.results.length) togglePick(state.selected, e.shiftKey); }
       else if (e.key === 'c') { const l = selectedLink(); if (l) copy(l.url, 'URL copied'); }
       else if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
       else if (e.key === 'l') { state.layout = state.layout === 'list' ? 'grid' : 'list'; renderResults(); renderToolbar(); }
@@ -876,15 +1094,25 @@
   // ------------------------------------------------------------------ drawer
   let drawerChips = null;
   let drawerFolder = null;
+  function checkLine(link) {
+    const c = link.check;
+    const cls = !c || !c.at ? 'muted' : c.ok === false ? 'bad' : c.ok === true ? 'good' : 'warn';
+    const text = !c || !c.at ? 'Not checked yet' : (link.checkLabel || 'checked') + ', ' + rel(c.at);
+    return '<span class="check-line ' + cls + '" id="dCheckLine">' + esc(text) + (c && c.redirected && c.finalUrl ? ' <span class="muted" title="' + esc(c.finalUrl) + '">(now at ' + esc(host(c.finalUrl)) + ')</span>' : '') + '</span>';
+  }
+
   function openDrawer(link) {
     if (!link) return;
     state.editing = link;
     const d = $('#drawer');
+    const trashed = Boolean(link.deleted);
     const shot = link.snapshot ? '<img src="' + esc(snapshotUrl(link)) + '" alt="">' : '<div class="none">no snapshot</div>';
     d.innerHTML =
       '<div class="drawer-head"><h3 title="' + esc(link.title) + '">' + esc(link.title) + '</h3>' +
       '<button class="btn sm" id="dOpen" title="Open">Open</button><button class="btn sm" id="dCopy" title="Copy URL">Copy</button><button class="btn sm ghost" id="dClose" title="Close (Esc)">&times;</button></div>' +
       '<div class="drawer-body">' +
+      (trashed ? '<div class="alert warn">In the trash since ' + rel(link.deleted) + '. Restore it to edit; it is removed for good after ' + (state.meta ? state.meta.settings.trashDays || 30 : 30) + ' days.</div>' : '') +
+      (link.check && link.check.ok === false ? '<div class="alert error">This link looks broken: ' + esc(link.checkLabel || '') + ' (checked ' + rel(link.check.at) + '). Open it to see for yourself, fix the address by adding the page again, or delete it.</div>' : '') +
       '<div class="shot-edit">' + shot + '</div>' +
       '<div class="field" style="margin-bottom:0">' + lbl('Snapshot source', 'snapshot') + '</div>' +
       '<div class="shot-actions"><button class="btn sm primary" id="dSnapBrowser" title="Screenshot this page through your browser: uses the tab if it is open, otherwise opens it in a tab for a few seconds and closes it (works for SSO pages)">From browser tab</button>' +
@@ -902,10 +1130,14 @@
       '<div class="field">' + lbl('Notes', 'notes') + '<textarea id="fNotes">' + esc(link.notes || '') + '</textarea></div>' +
       '<div class="stats"><span>Added <b>' + rel(link.created) + '</b></span><span>Last used <b>' + rel(link.lastUsed) + '</b></span><span>Opens <b>' + (link.useCount || 0) + '</b></span><span>Source <b>' + esc(link.source || '') + '</b></span>' +
       (link.snapshotMethod ? '<span>Snapshot <b>' + esc(link.snapshotMethod) + '</b> ' + rel(link.snapshotAt) + '</span>' : '') + '<span>Id <b>' + esc(link.id) + '</b></span></div>' +
+      '<div class="check-row"><span class="muted small">Link check</span> ' + checkLine(link) + (trashed ? '' : '<button class="btn sm ghost" id="dCheck" title="Fetch the page now and record whether it still loads">Check now</button>') + '</div>' +
       '</div>' +
-      '<div class="drawer-foot"><button class="btn primary" id="dSave">Save <kbd>&#8984;S</kbd></button><button class="btn" id="dClose2">Cancel</button><span class="grow" style="flex:1"></span><button class="btn danger" id="dDelete">Delete</button></div>';
+      (trashed
+        ? '<div class="drawer-foot"><button class="btn primary" id="dRestore">Restore</button><button class="btn" id="dClose2">Close</button><span class="grow" style="flex:1"></span><button class="btn danger" id="dDelete">Delete forever</button></div>'
+        : '<div class="drawer-foot"><button class="btn primary" id="dSave">Save <kbd>&#8984;S</kbd></button><button class="btn" id="dClose2">Cancel</button><span class="grow" style="flex:1"></span><button class="btn danger" id="dDelete">Delete</button></div>');
     d.classList.add('open');
     d.setAttribute('aria-hidden', 'false');
+    if (trashed) $$('#drawer input, #drawer textarea, #drawer .shot-actions .btn').forEach((el) => { el.disabled = true; });
     drawerChips = chipEditor($('#fTags'), { values: link.tags, all: state.meta ? state.meta.tags.map((t) => t.name) : [] });
     if (drawerFolder) drawerFolder.destroy();
     drawerFolder = folderPicker($('#fFolder'), { value: link.folder || '', folders: state.meta ? state.meta.folders : [] });
@@ -922,14 +1154,36 @@
     $('#dClose2').onclick = closeDrawer;
     $('#dOpen').onclick = () => openLink(link);
     $('#dCopy').onclick = () => copy(link.url, 'URL copied');
-    $('#dSave').onclick = saveDrawer;
+    const ds = $('#dSave');
+    if (ds) ds.onclick = saveDrawer;
+    const dr = $('#dRestore');
+    if (dr) dr.onclick = async () => { closeDrawer(); await restoreOne(link); };
     $('#dDelete').onclick = async (e) => {
       const b = e.currentTarget;
-      if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Confirm delete'; setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Delete'; }, 3000); return; }
-      await api('DELETE', '/api/links/' + link.id);
-      toast('Deleted');
-      closeDrawer();
-      await refreshAll();
+      const label = trashed ? 'Delete forever' : 'Delete';
+      if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = trashed ? 'Confirm: gone for good' : 'Confirm delete'; setTimeout(() => { b.classList.remove('armed'); b.textContent = label; }, 3000); return; }
+      try {
+        await api('DELETE', '/api/links/' + link.id);
+        closeDrawer();
+        if (trashed) toast('Deleted permanently');
+        else toast('Moved "' + link.title + '" to the trash', 7000, { label: 'Undo', onClick: () => restoreOne(link, true) });
+        await refreshAll();
+      } catch (err) { toast(err.message, 4000); }
+    };
+    const dc = $('#dCheck');
+    if (dc) dc.onclick = async () => {
+      dc.disabled = true;
+      $('#dCheckLine').innerHTML = '<span class="spin"></span> checking';
+      try {
+        const r = await api('POST', '/api/links/' + link.id + '/check');
+        replaceResult(r.link);
+        renderResults();
+        const line = $('#dCheckLine');
+        if (line) line.outerHTML = checkLine(r.link);
+        toast(r.link.checkLabel || 'Checked');
+        loadMeta().then(renderSidebar);
+      } catch (err) { toast(err.message, 4000); const line = $('#dCheckLine'); if (line) line.outerHTML = checkLine(link); }
+      finally { const b = $('#dCheck'); if (b) b.disabled = false; }
     };
     $('#dSnapRefresh').onclick = () => snapshotAction(link, {});
     $('#dSnapBrowser').onclick = () => snapshotAction(link, { mode: 'browser' });
@@ -988,7 +1242,8 @@
       || (drawerChips ? drawerChips.get().join(',') : '') !== (link.tags || []).join(',');
   }
 
-  // Two-step delete: first click arms the button for 3 seconds, second click deletes.
+  // Two-step delete: first click arms the button for 3 seconds, second click moves the link
+  // to the trash. The toast offers Undo.
   async function confirmDelete(button, link) {
     if (!button.classList.contains('armed')) {
       button.classList.add('armed');
@@ -1000,12 +1255,42 @@
     button.disabled = true;
     try {
       await api('DELETE', '/api/links/' + link.id);
-      toast('Deleted "' + link.title + '"');
+      toast('Moved "' + link.title + '" to the trash', 7000, { label: 'Undo', onClick: () => restoreOne(link, true) });
       if (state.editing && state.editing.id === link.id) closeDrawer();
       await refreshAll();
     } catch (err) {
       toast(err.message, 4000);
       button.disabled = false;
+    }
+  }
+
+  // Permanent removal from the trash, same two-step arming.
+  async function confirmPurge(button, link) {
+    if (!button.classList.contains('armed')) {
+      button.classList.add('armed');
+      button.textContent = 'Confirm: gone for good';
+      clearTimeout(button._disarm);
+      button._disarm = setTimeout(() => { button.classList.remove('armed'); button.textContent = 'Delete forever'; }, 3000);
+      return;
+    }
+    button.disabled = true;
+    try {
+      await api('DELETE', '/api/links/' + link.id + '?permanent=1');
+      toast('Deleted "' + link.title + '" permanently');
+      if (state.editing && state.editing.id === link.id) closeDrawer();
+      await refreshAll();
+    } catch (err) { toast(err.message, 4000); button.disabled = false; }
+  }
+
+  async function restoreOne(link, quiet) {
+    try {
+      const r = await api('POST', '/api/links/' + link.id + '/restore');
+      toast((quiet ? 'Restored' : 'Restored "' + link.title + '"') + (r.notes.length ? '. ' + r.notes.join('; ') : ''), r.notes.length ? 5000 : 2200);
+      if (state.editing && state.editing.id === link.id) closeDrawer();
+      await refreshAll();
+    } catch (err) {
+      if (err.status === 409 && err.data && err.data.link) toast('Cannot restore: ' + err.message, 5000);
+      else toast(err.message, 4000);
     }
   }
 
@@ -1017,7 +1302,7 @@
 
   async function saveDrawer() {
     const link = state.editing;
-    if (!link) return;
+    if (!link || link.deleted || !$('#fTitle')) return;
     const body = {
       title: $('#fTitle').value,
       tags: drawerChips.get(),
@@ -1181,18 +1466,20 @@
       try { data = await promise; } catch (err) { $('#iPreview').innerHTML = '<div class="alert error">' + esc(err.message) + '</div>'; return; }
       const items = data.items;
       if (data.format) source = data.format;
+      const ruled = items.filter((it) => it.ruleTags && it.ruleTags.length).length;
       const render = () => {
         const sel = items.filter((i) => i.selected).length;
         $('#iPreview').innerHTML =
           '<div class="card-box"><h2 style="margin-top:0">Preview: ' + items.length + ' links, ' + data.duplicates + ' already saved' + (data.format ? ' <span class="badge">' + esc(FORMAT_LABELS[data.format] || data.format) + (data.name ? ': ' + esc(data.name) : '') + '</span>' : '') + '</h2>' +
           (!items.length ? '<p class="muted">Nothing to import was found in this file.</p>' : '') +
+          (ruled ? '<p class="small muted">Your <a href="#/settings">tagging rules</a> add tags to ' + ruled + ' of these links; those tags are outlined <span class="chip rule" style="font-size:11px">like this</span>. The rest come from the file or from the innermost folder.</p>' : '') +
           '<div class="actions"><button class="btn sm" data-sel="new">Select new</button><button class="btn sm" data-sel="all">Select all</button><button class="btn sm" data-sel="none">Select none</button>' +
           '<span class="grow" style="flex:1"></span><label class="small muted" title="Screenshots are captured in the background after the import, one link at a time. Public pages get a real capture; pages behind sign-in get a tile you can replace later from the edit drawer.">Snapshots <select id="iSnap"><option value="browser">screenshots through my browser (opens each page; works for sign-in pages)</option><option value="auto">screenshots in the background (public pages only; others get a tile)</option><option value="tile">tiles only (instant)</option><option value="none">none</option></select></label>' +
           '<button class="btn primary" id="iCommit" ' + (sel ? '' : 'disabled') + '>Import ' + sel + ' link' + (sel === 1 ? '' : 's') + '</button></div>' +
           '<div class="tbl-wrap"><table class="tbl"><thead><tr><th></th><th>Title</th><th>URL</th><th>Folder</th><th>Tags</th><th></th></tr></thead><tbody>' +
           items.map((it, i) => '<tr class="' + (it.duplicate ? 'dup' : '') + '"><td><input type="checkbox" data-i="' + i + '" ' + (it.selected ? 'checked' : '') + '></td>' +
             '<td>' + esc(it.title || '(no title)') + '</td><td class="url" title="' + esc(it.url) + '">' + esc(it.url.replace(/^https?:\/\//, '')) + '</td>' +
-            '<td class="small muted">' + esc(it.folder || '') + '</td><td>' + (it.keyword ? '<span class="chip kw">go ' + esc(it.keyword) + '</span> ' : '') + it.tags.map((t) => '<span class="chip" style="font-size:11px">' + esc(t) + '</span>').join(' ') + '</td>' +
+            '<td class="small muted">' + esc(it.folder || '') + '</td><td>' + (it.keyword ? '<span class="chip kw">go ' + esc(it.keyword) + '</span> ' : '') + it.tags.map((t) => '<span class="chip' + ((it.ruleTags || []).includes(t) ? ' rule" title="added by a tagging rule' : '') + '" style="font-size:11px">' + esc(t) + '</span>').join(' ') + '</td>' +
             '<td>' + (it.duplicate ? '<span class="badge">saved</span>' : '') + '</td></tr>').join('') +
           '</tbody></table></div></div>';
         $$('#iPreview input[type=checkbox]').forEach((cb) => (cb.onchange = () => { items[Number(cb.dataset.i)].selected = cb.checked; updateCount(); }));
@@ -1240,20 +1527,41 @@
   }
   function tabShell(inner) { const b = $('#tabBody'); if (b) b.innerHTML = inner; }
 
+  // The bookmarklet button and its Copy button, shared by the Settings tab and the setup
+  // checklist. bindBookmarklet wires the copy after the markup is in the page.
+  function bookmarkletHtml(bm, id) {
+    return '<a class="btn" id="' + id + '" href="' + esc(bm.href) + '" onclick="return false" title="Drag me to the bookmarks bar">Add to Golinks</a> <button class="btn sm ghost" id="' + id + 'Copy" title="Copy the bookmarklet code to paste into a new bookmark by hand">Copy code</button>';
+  }
+  function bindBookmarklet(bm, id) {
+    const b = $('#' + id + 'Copy');
+    if (b) b.onclick = () => copy(bm.href, 'Bookmarklet code copied');
+  }
+  const goSearchUrl = (port) => 'http://localhost:' + port + '/go/%s';
+
   async function renderGeneralTab(guard) {
     const m = state.meta || (await loadMeta());
     const [health, bm, rules] = await Promise.all([api('GET', '/api/health'), api('GET', '/api/bookmarklet'), api('GET', '/api/rules')]);
     if (guard && !guard()) return;
     const s = m.settings;
+    const chk = m.check || {};
+    const c = m.counts || {};
     tabShell(
       '<div class="card-box"><h2 style="margin-top:0">General</h2>' +
       '<div class="row2"><div class="field"><label>Port</label><input type="number" id="sPort" value="' + s.port + '"><div class="help">Active: ' + health.port + '. Changing the port needs <code>bin/golinks restart</code> and updating the Chrome <code>:go</code> keyword and Shortcuts.</div></div>' +
       '<div class="field"><label>Stale after (days)</label><input type="number" id="sStale" value="' + s.staleDays + '"><div class="help">Links not opened for this long show as stale; snapshots older than this get a hint.</div></div></div>' +
       '<div class="row2"><div class="field"><label>Go confidence (min text score)</label><input type="number" step="0.1" id="sGo" value="' + s.goMinScore + '"><div class="help">Lower means <code>:go words</code> redirects more eagerly to the best match instead of showing search results.</div></div>' +
       '<div class="field"><label>Browser chrome to crop (points)</label><input type="number" id="sTopCrop" value="' + (s.topCrop ?? 116) + '"><div class="help">Height of tab strip, address bar and bookmarks bar removed from the top of window screenshots. 116 with the bookmarks bar shown, 87 without.</div></div></div>' +
+      '<div class="row2"><div class="field"><label>Keep deleted links for (days)</label><input type="number" id="sTrash" value="' + (s.trashDays || 30) + '"><div class="help">Deleted links wait in the <a href="#/view/trash">Trash</a> with their snapshots and can be restored. After this many days they are removed for good.</div></div>' +
+      '<div class="field"><label>Re-check links every (days)</label><input type="number" id="sCheckDays" value="' + (s.checkDays || 7) + '"><div class="help">How often each link is fetched in the background to see whether it still loads.</div></div></div>' +
       '<div class="row2"><div class="field checks"><label><input type="checkbox" id="sHeadless" ' + (s.headlessSnapshots ? 'checked' : '') + '> Headless Chrome snapshots for public pages' + (m.chrome ? '' : ' (no Chrome found)') + '</label>' +
-      '<label><input type="checkbox" id="sRevisit" ' + (s.snapshotOnRevisit ? 'checked' : '') + '> Snapshot on revisit (used by the open Shortcut)</label></div></div>' +
+      '<label><input type="checkbox" id="sRevisit" ' + (s.snapshotOnRevisit ? 'checked' : '') + '> Snapshot on revisit (used by the open Shortcut)</label>' +
+      '<label><input type="checkbox" id="sLinkCheck" ' + (s.linkCheck !== false ? 'checked' : '') + '> Check links in the background</label></div></div>' +
       '<div class="actions"><button class="btn primary" id="sSave">Save settings</button><span id="sMsg" class="small muted"></span></div></div>' +
+
+      '<div class="card-box"><h2 style="margin-top:0">Link check</h2>' +
+      '<p class="small muted">Each link is fetched now and then to see whether it still loads. A 404 or 410, or two failures in a row, marks it <b>broken</b>; those show in <a href="#/view/broken">Broken links</a> and match <code>is:broken</code>. Pages that redirect to a sign-in screen cannot be verified from here and are never marked broken; they match <code>is:unverified</code>.</p>' +
+      '<div class="shortcuts-help"><span class="muted">Broken</span><span>' + (c.broken || 0) + '</span><span class="muted">Cannot verify (sign-in)</span><span>' + (c.unverified || 0) + '</span><span class="muted">Never checked</span><span>' + (c.unchecked || 0) + '</span><span class="muted">Last run</span><span id="sCheckLast">' + (chk.running ? 'running, ' + chk.done + ' of ' + chk.total : chk.finishedAt ? rel(chk.finishedAt) : 'never') + '</span></div>' +
+      '<div class="actions"><button class="btn" id="sCheckAll">Check all links now</button><button class="btn" id="sCheckDue">Check links that are due</button><button class="btn ghost" id="sCheckBroken">Re-check broken</button><span id="sCheckMsg" class="small muted"></span></div></div>' +
 
       '<div class="card-box"><h2 style="margin-top:0">Templates</h2><p class="small muted">Parameterized go-links. <code>{0}</code> <code>{1}</code> are words after the name, <code>{q}</code> is everything after the name URL-encoded, <code>{*}</code> raw. Example: <code>:go jira PROJ-123</code>.</p>' +
       '<div class="field"><textarea class="code" id="sTemplates">' + esc(JSON.stringify(m.templates, null, 2)) + '</textarea></div>' +
@@ -1264,8 +1572,8 @@
       '<div class="actions"><button class="btn" id="sRulesSave">Save rules</button><span id="sRulesMsg" class="small muted"></span></div></div>' +
 
       '<div class="card-box"><h2 style="margin-top:0">Capture from Chrome</h2>' +
-      '<p><b>Omnibox:</b> in Chrome go to <code>chrome://settings/searchEngines</code>, add a site search named <code>Go Links</code> with shortcut <code>:go</code> and URL <code>http://localhost:' + health.port + '/go/%s</code>. Then type <code>:go epdesign</code> or <code>:go jira PROJ-123</code> in the address bar.</p>' +
-      '<p><b>Bookmarklet:</b> drag this to the bookmarks bar: <a class="btn" id="bmLink" href="' + esc(bm.href) + '" onclick="return false">Add to Golinks</a> <button class="btn sm ghost" id="bmCopy">Copy code</button></p>' +
+      '<p><b>Omnibox:</b> in Chrome go to <code>chrome://settings/searchEngines</code>, add a site search named <code>Go Links</code> with shortcut <code>:go</code> and URL <code>' + esc(goSearchUrl(health.port)) + '</code> <button class="btn sm" id="copyGoUrl" title="Copy the search URL for the site-search entry">Copy URL</button>. Then type <code>:go epdesign</code> or <code>:go jira PROJ-123</code> in the address bar.</p>' +
+      '<p><b>Bookmarklet:</b> drag this to the bookmarks bar: ' + bookmarkletHtml(bm, 'bmLink') + '</p>' +
       '<p><b>Hotkeys (optional):</b> see <code>shortcuts/README.md</code> for the two Apple Shortcuts (search, add current tab with screenshot).</p></div>' +
 
       '<div class="card-box"><h2 style="margin-top:0">Permissions and health</h2><div id="doctor"><span class="spin"></span> checking</div>' +
@@ -1285,11 +1593,12 @@
 
       '<div class="card-box"><h2 style="margin-top:0">Service</h2>' +
       '<div class="shortcuts-help"><span class="muted">Version</span><span>' + esc(health.version) + '</span><span class="muted">PID</span><span>' + health.pid + '</span><span class="muted">Uptime</span><span>' + Math.floor(health.uptimeSec / 60) + ' min</span><span class="muted">Links</span><span>' + health.links + '</span><span class="muted">Pending snapshots</span><span>' + health.pendingSnapshots + '</span></div>' +
-      '<div class="actions"><button class="btn danger" id="sQuit">Stop service</button><span class="small muted">Exits cleanly (code 0), so launchd leaves it stopped until login or <code>bin/golinks start</code>.</span></div></div>');
+      (m.restartNeeded ? '<div class="alert warn">The code on disk is newer than the running service. Click Restart to pick it up.</div>' : '') +
+      '<div class="actions"><button class="btn primary" id="sRestart">Restart service</button><span id="sRestartMsg" class="small muted"></span><span class="grow" style="flex:1"></span><button class="btn danger" id="sQuit">Stop service</button><span class="small muted">Stays stopped until you log in again or run <code>~/.golinks/bin/golinks start</code>.</span></div></div>');
 
     $('#sSave').onclick = async () => {
       try {
-        const r = await api('PUT', '/api/settings', { port: Number($('#sPort').value), staleDays: Number($('#sStale').value), goMinScore: Number($('#sGo').value), topCrop: Number($('#sTopCrop').value), headlessSnapshots: $('#sHeadless').checked, snapshotOnRevisit: $('#sRevisit').checked });
+        const r = await api('PUT', '/api/settings', { port: Number($('#sPort').value), staleDays: Number($('#sStale').value), goMinScore: Number($('#sGo').value), topCrop: Number($('#sTopCrop').value), headlessSnapshots: $('#sHeadless').checked, snapshotOnRevisit: $('#sRevisit').checked, trashDays: Number($('#sTrash').value), checkDays: Number($('#sCheckDays').value), linkCheck: $('#sLinkCheck').checked });
         $('#sMsg').textContent = r.restartRequired ? 'Saved. Restart required for the port change.' : 'Saved.';
         await loadMeta();
       } catch (err) { $('#sMsg').textContent = err.message; }
@@ -1309,7 +1618,19 @@
         $('#sRulesMsg').textContent = 'Saved.';
       } catch (err) { $('#sRulesMsg').textContent = err.message; }
     };
-    $('#bmCopy').onclick = () => copy(bm.href, 'Bookmarklet code copied');
+    bindBookmarklet(bm, 'bmLink');
+    $('#copyGoUrl').onclick = () => copy(goSearchUrl(health.port), 'go URL copied');
+    const runCheck = async (only) => {
+      try {
+        const r = await api('POST', '/api/check', { only });
+        $('#sCheckMsg').textContent = r.queued ? 'Checking ' + plural(r.queued, 'link') + ' in the background.' : 'Nothing to check.';
+        $('#sCheckLast').textContent = r.status.running ? 'running, ' + r.status.done + ' of ' + r.status.total : r.status.finishedAt ? rel(r.status.finishedAt) : 'never';
+        await loadMeta(); renderSidebar();
+      } catch (err) { $('#sCheckMsg').textContent = err.message; }
+    };
+    $('#sCheckAll').onclick = () => runCheck('all');
+    $('#sCheckDue').onclick = () => runCheck('due');
+    $('#sCheckBroken').onclick = () => runCheck('broken');
     const queueSnaps = async (only) => {
       try {
         const r = await api('POST', '/api/snapshots/refresh', { only });
@@ -1379,6 +1700,7 @@
         $('#doctorMsg').innerHTML = 'Screenshot works (' + esc(r.app) + '). <img src="' + r.snapshot + '" style="height:60px;vertical-align:middle;border-radius:4px;margin-left:8px">';
       } catch (err) { $('#doctorMsg').textContent = err.message; }
     };
+    $('#sRestart').onclick = () => restartService($('#sRestart'), $('#sRestartMsg'), () => { loadMeta().then(() => { renderSidebar(); renderSettingsPage('general'); }); });
     $('#sQuit').onclick = async (e) => {
       const b = e.currentTarget;
       if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Confirm stop'; setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Stop service'; }, 3000); return; }
@@ -1486,7 +1808,7 @@
       '<div class="check ' + (c.ok === true ? 'ok' : c.ok === false ? 'fail' : 'skip') + '"><span class="mark">' + (c.ok === true ? '&#10003;' : c.ok === false ? '&#10007;' : '&#8226;') + '</span>' +
       '<div><div>' + esc(c.label) + (c.detail ? ' <span class="muted small">' + esc(c.detail) + '</span>' : '') + '</div>' +
       (c.ok === false && c.fix ? '<div class="small fix">' + esc(c.fix) + '</div>' : '') + '</div></div>').join('') + '</div>' +
-      (d.restartNeeded ? '<div class="alert warn">The code on disk is newer than the running service. Run <code>bin/golinks restart</code>.</div>' : '');
+      (d.restartNeeded ? '<div class="alert warn">The code on disk is newer than the running service. Use the Restart button on this page, or run <code>~/.golinks/bin/golinks restart</code> in Terminal.</div>' : '');
     return d;
   }
 
@@ -1500,26 +1822,74 @@
     const [health, bm] = await Promise.all([api('GET', '/api/health'), api('GET', '/api/bookmarklet')]);
     if (guard && !guard()) return;
     const done = (m.settings.setup) || {};
-    const goUrl = 'http://localhost:' + health.port + '/go/%s';
+    const goUrl = goSearchUrl(health.port);
     const step = (key, title, body, auto) =>
       '<div class="step ' + (done[key] || auto ? 'done' : '') + '" data-step="' + key + '"><div class="step-head"><span class="mark">' + (done[key] || auto ? '&#10003;' : '') + '</span><h3>' + title + '</h3>' +
       (auto ? '' : '<button class="btn sm ghost" data-toggle="' + key + '">' + (done[key] ? 'Undo' : 'Mark done') + '</button>') + '</div><div class="step-body">' + body + '</div></div>';
+    // A value to copy: label, the value in a code box, and a Copy button (data-copy holds the text).
+    const copyRow = (label, value, what) => '<span>' + label + '</span><span class="copyval"><code>' + esc(value) + '</code><button class="btn sm" data-copy-text="' + esc(value) + '" data-copy-what="' + esc(what || label) + '">Copy</button></span>';
     tabShell(
-      '<p class="muted">Three short steps and one optional. Everything works without them, but each one makes Golinks faster to use.' + (m.setupComplete ? ' <b>All done.</b> This checklist no longer shows in the sidebar.' : '') + '</p>' +
-      step('service', 'Service is running', 'Version ' + esc(health.version) + ' on port ' + health.port + ', started at login by launchd. Check with <code>bin/golinks status</code>.', true) +
-      step('go', 'Address bar go-links', '<p>In your browser open the site-search settings and add an entry:</p>' +
-        '<div class="kv"><span>Chrome</span><code>chrome://settings/searchEngines</code><span>Brave</span><code>brave://settings/searchEngines</code><span>Edge</span><code>edge://settings/searchEngines</code></div>' +
-        '<div class="kv"><span>Name</span><code>Go Links</code><span>Shortcut</span><code>:go</code><span>URL</span><code id="goUrl">' + esc(goUrl) + '</code> <button class="btn sm" id="copyGo">Copy URL</button></div>' +
-        '<p class="small muted">Then type <code>:go</code>, Space, and a keyword such as <code>:go expenses</code> or <code>:go jira PROJ-123</code>. Safari has no site search; use the web UI or the search Shortcut there.</p>') +
-      step('bookmarklet', 'Bookmarklet: save any page with a screenshot', '<p>Drag this button to your bookmarks bar: <a class="btn" href="' + esc(bm.href) + '" onclick="return false">Add to Golinks</a> <button class="btn sm ghost" id="copyBm">Copy code</button></p><p class="small muted">Click it on any page, including SSO pages. A popup shows the screenshot of the page and suggested tags; Cmd+Enter saves.</p>') +
-      step('permissions', 'Allow screenshots of your browser', '<p>macOS must let the service (the <code>node</code> process) read browser tabs and capture the screen. Automation is asked for automatically on first use. Screen Recording has to be enabled by hand:</p>' +
-        '<ol class="small"><li>System Settings > Privacy & Security > Screen & System Audio Recording.</li><li>Enable <code>node</code>. If it is missing, press <b>+</b>, then Cmd+Shift+G and paste: <code id="execPath">' + esc(health.execPath) + '</code> <button class="btn sm" id="copyExec">Copy path</button></li><li>Run <code>bin/golinks restart</code>, then Re-check below.</li></ol>' +
-        '<div id="setupDoctor"></div><div class="actions"><button class="btn sm" id="setupDoctorRun">Re-check</button></div>') +
-      step('import', 'Import your bookmarks <span class="opt">optional</span>', '<p>Bring in browser bookmarks, a Golinks export, a bookmarks HTML file, CSV, Excel or Markdown with a preview and duplicate detection: <a href="#/settings/import" class="btn sm">Open Import</a></p>'));
-    $('#copyGo').onclick = () => copy(goUrl, 'go URL copied');
-    $('#copyBm').onclick = () => copy(bm.href, 'Bookmarklet code copied');
-    $('#copyExec').onclick = () => copy(health.execPath, 'Path copied');
+      '<p class="muted">Three short steps and one optional. Golinks works without them, but each one makes it faster to use. Mark a step done when you have finished it; the permissions step checks itself.' + (m.setupComplete ? ' <b>All done.</b> This checklist no longer shows in the sidebar; it stays here under Settings.' : '') + '</p>' +
+
+      step('service', 'Golinks is running',
+        '<p>Version ' + esc(health.version) + ' is running and will start on its own every time you log in to this Mac. Nothing to do here.</p>' +
+        '<p class="small muted">If the page ever says the service is not reachable, open Terminal (Cmd+Space, type <b>Terminal</b>, press Return), paste <code>~/.golinks/bin/golinks start</code> and press Return.</p>', true) +
+
+      step('go', 'Open links from the address bar',
+        '<p>After this step you can type <code>:go</code>, a space, and a name in your browser\'s address bar to jump straight to a saved link. It takes about a minute.</p>' +
+        '<ol class="steps">' +
+        '<li>Open your browser\'s site search settings. Copy the line for your browser, paste it into the address bar and press Return (these addresses cannot be clicked):' +
+        '<div class="kv">' + copyRow('Chrome', 'chrome://settings/searchEngines', 'Chrome address') + copyRow('Brave', 'brave://settings/searchEngines', 'Brave address') + copyRow('Edge', 'edge://settings/searchEngines', 'Edge address') + '</div></li>' +
+        '<li>Find the <b>Site search</b> section (Edge calls it <b>Address bar and search &gt; Manage search engines</b>) and click <b>Add</b>.</li>' +
+        '<li>Fill in the three fields exactly like this, then click <b>Add</b> or <b>Save</b>:' +
+        '<div class="kv">' + copyRow('Name', 'Go Links') + copyRow('Shortcut', ':go') + copyRow('URL', goUrl, 'URL') + '</div></li>' +
+        '<li>Try it: click the address bar, type <code>:go</code>, press <b>Space</b> (a "Go Links" label appears), type a word from a saved link\'s title and press Return. A go keyword such as <code>:go expenses</code> opens that link at once; <code>:go jira PROJ-123</code> expands a template.</li>' +
+        '</ol>' +
+        '<p class="small muted">Safari has no site search. There, search from this page or with the search Shortcut (see <code>shortcuts/README.md</code>).</p>') +
+
+      step('bookmarklet', 'Save any page with one click',
+        '<p>The <b>Add to Golinks</b> button below is a bookmark that saves the page you are looking at, with a real screenshot, even on pages behind company sign-in.</p>' +
+        '<ol class="steps">' +
+        '<li>Show your bookmarks bar if it is hidden: press <kbd>&#8984;</kbd><kbd>Shift</kbd><kbd>B</kbd> (Chrome, Brave, Edge and Safari all use it). It is the strip of bookmarks under the address bar.</li>' +
+        '<li>Drag this button onto that strip and let go: ' + bookmarkletHtml(bm, 'setupBm') + '</li>' +
+        '<li>Try it: open any web page and click <b>Add to Golinks</b> in the bookmarks bar. A small window shows the screenshot, a title and suggested tags; click <b>Save</b> (or press <kbd>&#8984;</kbd><kbd>&#8629;</kbd>).</li>' +
+        '</ol>' +
+        '<p class="small muted">If dragging does not work in your browser: click <b>Copy code</b> above, right-click the bookmarks bar and choose <b>Add page</b> (Chrome, Brave), <b>Add this page to favorites</b> (Edge) or <b>Add Bookmark</b> (Safari, from the Bookmarks menu). Name it <code>Add to Golinks</code> and paste the copied code into the address or URL field.</p>') +
+
+      step('permissions', 'Allow screenshots of your browser',
+        '<p>Screenshots are taken by the Golinks service, which macOS lists under the name <b>node</b>. It needs two permissions, both one-time. The result of each check shows at the bottom of this step.</p>' +
+        '<h4 class="sub-h">1. Automation (asked for automatically)</h4>' +
+        '<p>The first time Golinks takes a screenshot, macOS shows a message like <i>"node" wants access to control "Google Chrome"</i>. Click <b>Allow</b>. If you clicked Don\'t Allow by mistake, open the pane and turn the switch for your browser back on: <button class="btn sm" data-open-pane="automation">Open Automation settings</button></p>' +
+        '<h4 class="sub-h">2. Screen Recording (has to be turned on by hand)</h4>' +
+        '<ol class="steps">' +
+        '<li>Open the Screen Recording pane: <button class="btn sm" data-open-pane="screen">Open Screen Recording settings</button> <span class="small muted">or, by hand: Apple menu &gt; System Settings &gt; Privacy &amp; Security &gt; Screen &amp; System Audio Recording.</span></li>' +
+        '<li>Find <b>node</b> in the list and turn its switch on. macOS may ask for your Mac password.</li>' +
+        '<li>If <b>node</b> is not in the list: click the <b>+</b> button under the list, press <kbd>&#8984;</kbd><kbd>Shift</kbd><kbd>G</kbd>, paste this path, press Return, then click <b>Open</b>:' +
+        '<div class="kv">' + copyRow('Path', health.execPath, 'Path') + '</div></li>' +
+        '<li>macOS may offer to <b>Quit &amp; Reopen</b> node. Choose <b>Later</b> and use this button instead, then wait a few seconds: <button class="btn sm primary" id="setupRestart">Restart Golinks</button> <span id="setupRestartMsg" class="small muted"></span></li>' +
+        '<li>Keep your browser open and click <b>Re-check</b>. Both checks turn green when everything is allowed, and this step marks itself done.</li>' +
+        '</ol>' +
+        '<div id="setupDoctor"></div><div class="actions"><button class="btn sm" id="setupDoctorRun">Re-check</button><button class="btn sm ghost" id="setupTestShot" title="Takes a screenshot of this tab through the service, the same way the bookmarklet does">Test a screenshot</button><span id="setupTestMsg" class="small muted"></span></div>') +
+
+      step('import', 'Bring in your existing bookmarks <span class="opt">optional</span>',
+        '<p>Golinks can read your browser\'s bookmarks directly, or a file: a bookmarks export (HTML), a spreadsheet (CSV or Excel), Markdown, or any text with links in it. You see a preview first, already-saved links are marked, and nothing is changed in your browser.</p>' +
+        '<p><a href="#/settings/import" class="btn sm">Open Import</a></p>'));
+    $$('[data-copy-text]').forEach((b) => (b.onclick = () => copy(b.dataset.copyText, b.dataset.copyWhat + ' copied')));
+    bindBookmarklet(bm, 'setupBm');
     $$('[data-toggle]').forEach((b) => (b.onclick = async () => { await markSetup(b.dataset.toggle, !done[b.dataset.toggle]); renderSidebar(); renderSettingsPage('setup'); }));
+    $$('[data-open-pane]').forEach((b) => (b.onclick = async () => {
+      try { await api('POST', '/api/open-settings', { pane: b.dataset.openPane }); toast('System Settings is opening'); }
+      catch (err) { toast(err.message, 4000); }
+    }));
+    $('#setupRestart').onclick = () => restartService($('#setupRestart'), $('#setupRestartMsg'), () => renderSettingsPage('setup'));
+    $('#setupTestShot').onclick = async () => {
+      const msg = $('#setupTestMsg');
+      msg.innerHTML = '<span class="spin"></span> taking a screenshot of this tab';
+      try {
+        const r = await api('POST', '/api/capture', { url: location.origin + '/' });
+        msg.innerHTML = 'It works: screenshot taken from ' + esc(r.app) + '. <img src="' + r.snapshot + '" style="height:48px;vertical-align:middle;border-radius:4px;margin-left:6px">';
+      } catch (err) { msg.textContent = 'Not yet: ' + err.message + '. Check the two permissions above.'; }
+    };
     const dEl = $('#setupDoctor');
     const runDoc = async () => {
       const d = await renderDoctor(dEl);
@@ -1531,6 +1901,97 @@
     };
     $('#setupDoctorRun').onclick = runDoc;
     runDoc();
+  }
+
+  // Ask the service to restart itself (launchd brings it back), wait for the new process,
+  // then call `after`. Falls back to Terminal instructions when it is not run by launchd.
+  async function restartService(button, msgEl, after) {
+    button.disabled = true;
+    msgEl.innerHTML = '<span class="spin"></span> restarting';
+    let before = null;
+    try { before = (await api('GET', '/api/health')).pid; } catch { /* ignore */ }
+    let r;
+    try { r = await api('POST', '/api/restart'); } catch { r = { relaunch: true }; }
+    if (r && r.relaunch === false) {
+      msgEl.innerHTML = 'Golinks was started by hand, so it cannot restart itself. In Terminal, press Ctrl+C where it runs and start it again, or run <code>~/.golinks/bin/golinks restart</code>.';
+      button.disabled = false;
+      return;
+    }
+    const t0 = Date.now();
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    while (Date.now() - t0 < 30000) {
+      await sleep(1000);
+      try {
+        const h = await fetch('/api/health').then((x) => x.json());
+        if (h && h.ok && h.pid !== before) {
+          setDown(false);
+          msgEl.textContent = 'Restarted.';
+          toast('Golinks restarted');
+          button.disabled = false;
+          if (after) after();
+          return;
+        }
+      } catch { /* still coming back */ }
+    }
+    msgEl.innerHTML = 'Still not back after 30 seconds. In Terminal, run <code>~/.golinks/bin/golinks start</code>.';
+    button.disabled = false;
+  }
+
+  // ------------------------------------------------------------------ duplicates page
+  const DUP_KIND = { exact: 'Same address', variant: 'Same page, different query', title: 'Same site and title' };
+  async function renderDuplicatesPage() {
+    pageShell('Duplicates', '<div class="card-box"><span class="spin"></span> looking for duplicates</div>');
+    let data;
+    try { data = await api('GET', '/api/duplicates'); } catch (err) { $('#content .page').innerHTML += '<div class="alert error">' + esc(err.message) + '</div>'; return; }
+    if (state.route.page !== 'duplicates') return;
+    const groups = data.groups;
+    const page = $('#content .page');
+    if (!groups.length) {
+      page.innerHTML = '<h1>Duplicates</h1><div class="empty"><b>No duplicates found</b>Links with the same address, the same page under a different query string, or the same title on the same site would show up here. Groups you marked as not duplicates stay hidden.</div>';
+      return;
+    }
+    page.innerHTML = '<h1>Duplicates</h1><p class="muted">' + plural(groups.length, 'group') + '. In each group pick the link to keep; merging unions its tags and aliases, adds up opens, fills in missing fields and moves the others to the <a href="#/view/trash">Trash</a>, where they can still be restored. <b>Not duplicates</b> hides a group for good.</p>' +
+      groups.map((g, gi) => '<div class="card-box dup-group" data-g="' + gi + '"><div class="dup-head"><span class="badge ' + (g.kind === 'exact' ? 'danger' : g.kind === 'variant' ? 'warn' : '') + '">' + esc(DUP_KIND[g.kind] || g.kind) + '</span><span class="small muted">' + esc(g.why) + ', ' + plural(g.links.length, 'link') + '</span><span class="grow"></span>' +
+        '<button class="btn sm primary" data-merge>Merge into kept</button><button class="btn sm ghost" data-ignore title="Hide this group; these links are different on purpose">Not duplicates</button></div>' +
+        g.links.map((l, li) => '<label class="dup-row' + (li === 0 ? ' keep' : '') + '"><input type="radio" name="keep' + gi + '" value="' + esc(l.id) + '"' + (li === 0 ? ' checked' : '') + ' title="Keep this one">' +
+          (l.snapshot ? '<img class="thumb" src="' + esc(snapshotUrl(l)) + '" alt="" loading="lazy">' : tileHtml(l, 'thumb none')) +
+          '<div class="main"><div class="title"><span class="t" title="' + esc(l.title) + '">' + esc(l.title) + '</span>' + (l.keyword ? '<span class="chip kw">go ' + esc(l.keyword) + '</span>' : '') + (li === 0 ? '<span class="badge keep-badge">keep</span>' : '') + '</div>' +
+          '<div class="sub"><a class="host" href="/open/' + esc(l.id) + '" target="_blank" title="' + esc(l.url) + '">' + esc(l.url.replace(/^https?:\/\//, '')) + '</a></div>' +
+          '<div class="sub">' + (l.folder ? '<a class="fpath" href="' + folderHash(l.folder) + '" title="' + esc(l.folder) + '">' + FOLDER_ICO + '<span class="fl">' + esc(l.folder) + '</span></a><span class="sep"></span>' : '') + (l.tags.length ? '<span class="tags">' + l.tags.map((t) => '<span class="chip">' + esc(t) + '</span>').join('') + '</span><span class="sep"></span>' : '') +
+          '<span>' + (l.useCount ? plural(l.useCount, 'open') + ', ' : '') + 'added ' + rel(l.created) + (l.lastUsed ? ', used ' + rel(l.lastUsed) : '') + '</span></div></div>' +
+          '<a class="btn sm ghost" href="#/link/' + esc(l.id) + '" title="Open the edit drawer">Edit</a></label>').join('') +
+        '</div>').join('');
+    $$('.dup-group', page).forEach((box) => {
+      const g = groups[Number(box.dataset.g)];
+      box.addEventListener('change', (e) => {
+        if (e.target.type !== 'radio') return;
+        $$('.dup-row', box).forEach((r) => { const on = $('input', r).checked; r.classList.toggle('keep', on); const b = $('.keep-badge', r); if (on && !b) $('.title', r).insertAdjacentHTML('beforeend', '<span class="badge keep-badge">keep</span>'); if (!on && b) b.remove(); });
+      });
+      $('[data-merge]', box).onclick = async (e) => {
+        const keep = ($('input:checked', box) || {}).value;
+        if (!keep) return;
+        const remove = g.links.map((l) => l.id).filter((id) => id !== keep);
+        const kept = g.links.find((l) => l.id === keep);
+        const ok = await dialog({ input: false, ok: 'Merge', title: 'Merge ' + plural(remove.length, 'link') + ' into "' + kept.title + '"?', message: 'Tags, aliases and opens are combined on the kept link' + (!kept.snapshot || kept.snapshotMethod === 'tile' ? ', which also takes over a real snapshot if another one has it' : '') + '. The other ' + (remove.length === 1 ? 'link goes' : 'links go') + ' to the trash.' });
+        if (!ok) return;
+        e.currentTarget.disabled = true;
+        try {
+          const r = await api('POST', '/api/duplicates/merge', { keep, remove });
+          toast('Merged ' + plural(r.merged.length, 'link') + ' into "' + r.link.title + '"' + (r.changed.length ? ' (' + r.changed.join(', ') + ' updated)' : ''), 5000);
+          await loadMeta(); renderSidebar();
+          renderDuplicatesPage();
+        } catch (err) { toast(err.message, 4000); e.currentTarget.disabled = false; }
+      };
+      $('[data-ignore]', box).onclick = async () => {
+        try {
+          await api('POST', '/api/duplicates/ignore', { ids: g.links.map((l) => l.id) });
+          box.remove();
+          toast('Group hidden');
+          await loadMeta(); renderSidebar();
+          if (!$('.dup-group', page)) renderDuplicatesPage();
+        } catch (err) { toast(err.message, 4000); }
+      };
+    });
   }
 
   // ------------------------------------------------------------------ boot
@@ -1551,10 +2012,11 @@
     // keep counts and pending snapshots fresh
     setInterval(async () => {
       if (document.hidden) return;
-      const before = state.meta && (state.meta.pendingSnapshots.length + ':' + (state.meta.browserBatch ? state.meta.browserBatch.done + '/' + state.meta.browserBatch.running : ''));
+      const sig = () => state.meta && (state.meta.pendingSnapshots.length + ':' + (state.meta.browserBatch ? state.meta.browserBatch.done + '/' + state.meta.browserBatch.running : '') + ':' + (state.meta.check ? state.meta.check.done + '/' + state.meta.check.running : ''));
+      const before = sig();
       await loadMeta();
-      const after = state.meta && (state.meta.pendingSnapshots.length + ':' + (state.meta.browserBatch ? state.meta.browserBatch.done + '/' + state.meta.browserBatch.running : ''));
-      if (state.meta && before !== after) { renderSidebar(); if (state.route.page === 'links' && !state.editing) doSearch(); }
+      const after = sig();
+      if (state.meta && before !== after) { renderSidebar(); if (state.route.page === 'links' && !state.editing && !state.sel.size) doSearch(); else if (state.route.page === 'links') renderToolbar(); }
     }, 5000);
   }
   boot();

@@ -19,6 +19,8 @@ const capture = require('./lib/capture');
 const suggest = require('./lib/suggest');
 const exporter = require('./lib/exporter');
 const browserbatch = require('./lib/browserbatch');
+const linkcheck = require('./lib/linkcheck');
+const dupes = require('./lib/dupes');
 const { HttpError, sendJson, sendText, redirect, readJson, serveFile } = require('./lib/http');
 
 const VERSION = require('./package.json').version;
@@ -33,8 +35,9 @@ store.watch();
 
 const PORT = Number(process.env.LINKS_PORT || store.settings.port || 7777);
 
-let index = search.buildIndex(store.links);
-function reindex() { index = search.buildIndex(store.links); }
+// The search index covers live links only; the trash view builds its own small index per request.
+let index = search.buildIndex(store.live);
+function reindex() { index = search.buildIndex(store.live); }
 store.on('reloaded', reindex);
 
 function log(...args) {
@@ -125,10 +128,11 @@ function setFolder(v) {
   return path;
 }
 
+// Trashed links do not count as duplicates: saving a URL again after trashing it works.
 function findDuplicate(url, selfId) {
   const key = dedupeKey(url);
   if (!key) return null;
-  return store.links.find((l) => l.id !== selfId && dedupeKey(l.url) === key) || null;
+  return store.links.find((l) => !l.deleted && l.id !== selfId && dedupeKey(l.url) === key) || null;
 }
 
 function decorate(link) {
@@ -138,6 +142,8 @@ function decorate(link) {
     stale: search.isStale(link, store.settings.staleDays, now),
     snapshotStale: search.snapshotStale(link, store.settings.staleDays, now),
     snapshotPending: pending.has(link.id),
+    checkPending: checkPending.has(link.id),
+    checkLabel: linkcheck.describe(link.check),
   };
 }
 
@@ -238,12 +244,162 @@ function recordUse(link) {
   reindex();
 }
 
-function deleteLink(link) {
+// Delete is a move to the trash: the link and its snapshot stay on disk, hidden from every
+// view, until restored, purged by hand, or older than settings.trashDays.
+function trashLink(link, opts = {}) {
+  if (link.deleted) return link;
+  link.deleted = new Date().toISOString();
+  if (!opts.batch) { store.save('links'); reindex(); }
+  return link;
+}
+
+function purgeLink(link, opts = {}) {
   const i = store.links.indexOf(link);
   if (i >= 0) store.links.splice(i, 1);
   snapshots.removeAll(link.id);
+  if (!opts.batch) { store.save('links'); reindex(); }
+}
+
+// Back from the trash. A live link with the same URL blocks the restore (409); a keyword taken
+// meanwhile is dropped and reported in `notes`.
+function restoreLink(link, opts = {}) {
+  if (!link.deleted) return { link, notes: [] };
+  const dup = findDuplicate(link.url, link.id);
+  if (dup) throw new HttpError(409, `"${dup.title}" already has this url`, { link: decorate(dup) });
+  const notes = [];
+  if (link.keyword) {
+    const clash = store.findByKeyword(link.keyword);
+    const isTemplate = Object.keys(store.templates || {}).some((t) => t.toLowerCase() === link.keyword);
+    if (clash || isTemplate) { notes.push(`keyword "${link.keyword}" is now used elsewhere and was removed`); link.keyword = null; }
+  }
+  delete link.deleted;
+  if (link.folder) setFolder(link.folder);
+  if (!opts.batch) { store.save('links'); reindex(); }
+  return { link, notes };
+}
+
+function purgeExpiredTrash() {
+  const days = Number(store.settings.trashDays) || 30;
+  const cutoff = Date.now() - days * 86400000;
+  const gone = store.links.filter((l) => l.deleted && Date.parse(l.deleted) < cutoff);
+  if (!gone.length) return 0;
+  for (const l of gone) purgeLink(l, { batch: true });
   store.save('links');
   reindex();
+  log('[trash] purged', gone.length, 'link(s) older than', days, 'days');
+  return gone.length;
+}
+
+// ---------------------------------------------------------------------------
+// Dead link check: a few probes at a time, results stored on link.check.
+
+const checkPending = new Set();
+const checkQueue = [];
+const CHECK_PARALLEL = 4;
+let checkActive = 0;
+let checkRun = { startedAt: null, finishedAt: null, total: 0, done: 0, broken: 0 };
+
+function enqueueCheck(id) {
+  if (checkPending.has(id)) return false;
+  checkPending.add(id);
+  checkQueue.push(id);
+  if (!checkActive) { checkRun = { startedAt: new Date().toISOString(), finishedAt: null, total: 0, done: 0, broken: 0 }; }
+  checkRun.total++;
+  drainChecks();
+  return true;
+}
+
+function drainChecks() {
+  while (checkActive < CHECK_PARALLEL && checkQueue.length) {
+    const id = checkQueue.shift();
+    checkActive++;
+    checkOne(id).catch((err) => log('[check]', id, 'failed:', err.message)).finally(() => {
+      checkPending.delete(id);
+      checkActive--;
+      checkRun.done++;
+      if (!checkQueue.length && !checkActive) { checkRun.finishedAt = new Date().toISOString(); store.save('links'); reindex(); log('[check] done', checkRun.done, 'checked,', checkRun.broken, 'broken'); }
+      else drainChecks();
+    });
+  }
+}
+
+async function checkOne(id) {
+  const link = store.findById(id);
+  if (!link) return null;
+  const result = await linkcheck.checkUrl(link.url, link.check);
+  const current = store.findById(id);
+  if (!current) return null;
+  current.check = result;
+  if (result.ok === false) checkRun.broken++;
+  // Intermediate saves every few results keep a long run from losing everything on a crash.
+  if (checkRun.done % 10 === 9) store.save('links');
+  return result;
+}
+
+function checkStatus() {
+  return { running: checkActive > 0 || checkQueue.length > 0, queued: checkQueue.length + checkActive, ...checkRun, enabled: store.settings.linkCheck !== false, days: store.settings.checkDays || 7 };
+}
+
+// Links whose last check is older than settings.checkDays (or never checked).
+function dueForCheck(now = Date.now()) {
+  const days = Number(store.settings.checkDays) || 7;
+  return store.live.filter((l) => !(l.check && l.check.at) || now - Date.parse(l.check.at) > days * 86400000);
+}
+
+function scheduleChecks(only) {
+  let links;
+  if (only === 'all') links = store.live;
+  else if (only === 'broken') links = store.live.filter(linkcheck.isBroken);
+  else if (only === 'unchecked') links = store.live.filter((l) => !(l.check && l.check.at));
+  else links = dueForCheck();
+  let n = 0;
+  for (const l of links) if (enqueueCheck(l.id)) n++;
+  return n;
+}
+
+// Housekeeping: purge old trash and, when enabled, check links that are due. Runs a minute
+// after start (so a restart does not hammer the network) and then every six hours.
+function housekeeping() {
+  try { purgeExpiredTrash(); } catch (err) { log('[trash] purge failed:', err.message); }
+  if (store.settings.linkCheck !== false) {
+    const n = scheduleChecks('due');
+    if (n) log('[check] scheduled', n, 'due link(s)');
+  }
+}
+setTimeout(housekeeping, 60 * 1000).unref();
+setInterval(housekeeping, 6 * 3600 * 1000).unref();
+
+// ---------------------------------------------------------------------------
+// Duplicates
+
+function duplicateGroups() {
+  return dupes.findGroups(store.live, store.settings.dupIgnore || []);
+}
+
+// Fold `removeIds` into `keep`: fields merge, a missing snapshot is taken over, the others go to
+// the trash (so a wrong merge can still be undone by restoring them).
+function mergeLinks(keep, removeIds) {
+  const others = removeIds.map((id) => store.findById(id)).filter((l) => l && l.id !== keep.id && !l.deleted);
+  if (!others.length) throw new HttpError(400, 'nothing to merge');
+  const changed = dupes.mergeInto(keep, others);
+  if (!keep.snapshot || keep.snapshotMethod === 'tile') {
+    const donor = others.find((o) => o.snapshot && o.snapshotMethod !== 'tile') || others.find((o) => o.snapshot);
+    if (donor) {
+      try {
+        const buf = fs.readFileSync(path.join(snapshots.SNAP_DIR, path.basename(donor.snapshot)));
+        keep.snapshot = snapshots.saveBuffer(keep.id, buf);
+        keep.snapshotAt = donor.snapshotAt || new Date().toISOString();
+        keep.snapshotMethod = donor.snapshotMethod || 'merge';
+        changed.push('snapshot');
+      } catch (err) { log('[merge] snapshot copy failed:', err.message); }
+    }
+  }
+  if (keep.folder) setFolder(keep.folder);
+  keep.updated = new Date().toISOString();
+  for (const o of others) { o.mergedInto = keep.id; trashLink(o, { batch: true }); }
+  store.save('links');
+  reindex();
+  return { link: keep, merged: others.map((o) => o.id), changed };
 }
 
 // Screenshot the browser tab showing url. When no tab has it open (or the tab sits on
@@ -290,7 +446,7 @@ async function doctor() {
   const checks = [];
   const add = (id, ok, label, detail, fix) => checks.push({ id, ok, label, detail: detail || '', fix: fix || '' });
   const major = Number(process.versions.node.split('.')[0]);
-  add('node', major >= 18, `Node ${process.version}`, process.execPath, major >= 18 ? '' : 'Install Node 18 or newer (the .pkg from nodejs.org, nvm or Homebrew) and run bin/golinks node && bin/golinks restart');
+  add('node', major >= 18, `Node ${process.version}`, process.execPath, major >= 18 ? '' : 'Install Node 18 or newer (the installer from nodejs.org is the simplest), then in Terminal run: ~/.golinks/bin/golinks node and ~/.golinks/bin/golinks restart');
   let writable = true;
   try { fs.accessSync(DATA_DIR, fs.constants.W_OK); } catch { writable = false; }
   add('data', writable, 'Data folder writable', DATA_DIR, 'Check permissions on the data folder');
@@ -306,7 +462,7 @@ async function doctor() {
   } catch (err) {
     automation = { ok: false, detail: err.message };
   }
-  add('automation', automation.ok, 'Automation: read browser tabs', automation.detail, 'System Settings > Privacy & Security > Automation: allow "node" to control your browser. macOS asks the first time a capture runs.');
+  add('automation', automation.ok, 'Automation: read browser tabs', automation.detail, 'Open System Settings > Privacy & Security > Automation, find "node" and turn on the switch for your browser. macOS also offers this in a pop-up the first time a screenshot is taken; click Allow there.');
 
   let screen = { ok: null, detail: 'no browser window on screen to test with' };
   try {
@@ -316,7 +472,7 @@ async function doctor() {
       screen = named.length ? { ok: true, detail: `${wins.length} browser window(s) visible` } : { ok: false, detail: 'window titles are hidden, which means Screen Recording is not granted' };
     }
   } catch (err) { screen = { ok: false, detail: err.message }; }
-  add('screen', screen.ok, 'Screen Recording: capture browser windows', screen.detail, `System Settings > Privacy & Security > Screen & System Audio Recording: enable "node". If missing, press + and pick ${process.execPath}. Then run bin/golinks restart.`);
+  add('screen', screen.ok, 'Screen Recording: capture browser windows', screen.detail, 'Open System Settings > Privacy & Security > Screen & System Audio Recording and turn on "node" (add it with + if it is not listed, using the path shown above). Then restart Golinks and re-check.');
 
   return { ok: checks.every((c) => c.ok !== false), checks, browsers, execPath: process.execPath, version: VERSION, port: PORT, home: HOME_DIR, restartNeeded: codeChangedSinceStart() };
 }
@@ -327,8 +483,9 @@ async function doctor() {
 function meta() {
   const now = Date.now();
   const tags = new Map();
-  let untagged = 0, stale = 0, recent = 0, mostused = 0, keywords = 0, nosnap = 0, unfiled = 0;
-  for (const l of store.links) {
+  const live = store.live;
+  let untagged = 0, stale = 0, recent = 0, mostused = 0, keywords = 0, nosnap = 0, unfiled = 0, broken = 0, unverified = 0, unchecked = 0;
+  for (const l of live) {
     if (!l.tags || !l.tags.length) untagged++;
     for (const t of l.tags || []) tags.set(t, (tags.get(t) || 0) + 1);
     if (!l.folder) unfiled++;
@@ -337,22 +494,27 @@ function meta() {
     if (l.useCount > 0) mostused++;
     if (l.keyword) keywords++;
     if (!l.snapshot) nosnap++;
+    if (linkcheck.isBroken(l)) broken++;
+    else if (linkcheck.isUnverified(l)) unverified++;
+    else if (!(l.check && l.check.at)) unchecked++;
   }
+  const trash = store.links.length - live.length;
   const sortCount = (m) => [...m.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   return {
     version: VERSION,
     port: PORT,
-    counts: { all: store.links.length, untagged, stale, recent, mostused, keywords, nosnapshot: nosnap, unfiled },
+    counts: { all: live.length, untagged, stale, recent, mostused, keywords, nosnapshot: nosnap, unfiled, trash, broken, unverified, unchecked, duplicates: duplicateGroups().length },
     tags: sortCount(tags),
-    folders: folders.listFolders(store.links, store.folders),
+    folders: folders.listFolders(live, store.folders),
     templates: store.templates,
     rulesCount: store.rules.length,
     exportFormats: Object.entries(exporter.FORMATS).map(([id, f]) => ({ id, label: f.label, ext: f.ext })),
     setupComplete: ['go', 'bookmarklet', 'permissions'].every((k) => store.settings.setup && store.settings.setup[k]),
     settings: store.settings,
     pendingSnapshots: [...pending],
-    snapshotStats: { missing: store.links.filter((l) => !l.snapshot).length, tiles: store.links.filter((l) => l.snapshotMethod === 'tile').length },
+    snapshotStats: { missing: live.filter((l) => !l.snapshot).length, tiles: live.filter((l) => l.snapshotMethod === 'tile').length },
     browserBatch: browserbatch.status(),
+    check: checkStatus(),
     chrome: Boolean(snapshots.chromeBinary()),
     execPath: process.execPath,
     home: HOME_DIR,
@@ -365,7 +527,7 @@ function meta() {
 
 function suggestFor(url, opts = {}) {
   const taken = (k) => Boolean(store.findByKeyword(k) && store.findByKeyword(k).id !== opts.selfId) || Object.keys(store.templates || {}).some((t) => t.toLowerCase() === k);
-  return suggest.suggest(url, { ...opts, links: store.links, isKeywordTaken: taken });
+  return suggest.suggest(url, { ...opts, links: store.live, isKeywordTaken: taken });
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +563,12 @@ function getLinkOr404(id) {
   return link;
 }
 
+// What the importer sees when marking duplicates: live links only, so a trashed link does
+// not stop its URL from being imported again.
+function previewStore() {
+  return { links: store.live, rules: store.rules };
+}
+
 async function route(req, res, url) {
   const { method } = req;
   const p = url.pathname;
@@ -432,20 +600,23 @@ async function route(req, res, url) {
 
   // API
   if (p === '/api/health') {
-    return sendJson(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT, uptimeSec: Math.round((Date.now() - STARTED) / 1000), links: store.links.length, pendingSnapshots: pending.size, restartNeeded: codeChangedSinceStart(), node: process.version, execPath: process.execPath, home: HOME_DIR });
+    return sendJson(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT, uptimeSec: Math.round((Date.now() - STARTED) / 1000), links: store.live.length, trash: store.links.length - store.live.length, pendingSnapshots: pending.size, pendingChecks: checkPending.size, restartNeeded: codeChangedSinceStart(), node: process.version, execPath: process.execPath, home: HOME_DIR });
   }
   if (p === '/api/doctor' && method === 'GET') return sendJson(res, 200, await doctor());
   if (p === '/api/meta' && method === 'GET') return sendJson(res, 200, meta());
 
   if (p === '/api/search' && method === 'GET') {
-    const r = search.search(index, param(url, 'q'), {
+    const view = param(url, 'view', null);
+    // The trash has its own index so trashed links never leak into ordinary results.
+    const idx = view === 'trash' ? search.buildIndex(store.trashed) : index;
+    const r = search.search(idx, param(url, 'q'), {
       tag: param(url, 'tag', null),
       folder: folderParam(url),
-      view: param(url, 'view', null),
+      view,
       limit: Number(param(url, 'limit', 200)) || 200,
       staleDays: store.settings.staleDays,
     });
-    r.results = r.results.map((l) => ({ ...l, snapshotPending: pending.has(l.id) }));
+    r.results = r.results.map((l) => ({ ...l, snapshotPending: pending.has(l.id), checkPending: checkPending.has(l.id), checkLabel: linkcheck.describe(l.check) }));
     return sendJson(res, 200, r);
   }
 
@@ -453,10 +624,12 @@ async function route(req, res, url) {
     if (method === 'GET') {
       const q = param(url, 'q');
       if (q || url.searchParams.has('tag') || url.searchParams.has('folder') || url.searchParams.has('collection') || url.searchParams.has('view')) {
-        const r = search.search(index, q, { tag: param(url, 'tag', null), folder: folderParam(url), view: param(url, 'view', null), limit: 10000, staleDays: store.settings.staleDays });
+        const view = param(url, 'view', null);
+        const r = search.search(view === 'trash' ? search.buildIndex(store.trashed) : index, q, { tag: param(url, 'tag', null), folder: folderParam(url), view, limit: 10000, staleDays: store.settings.staleDays });
         return sendJson(res, 200, { total: r.total, links: r.results });
       }
-      return sendJson(res, 200, { total: store.links.length, links: store.links.map(decorate) });
+      const live = store.live;
+      return sendJson(res, 200, { total: live.length, links: live.map(decorate) });
     }
     if (method === 'POST') {
       const body = await readJson(req);
@@ -471,7 +644,7 @@ async function route(req, res, url) {
     const body = await readJson(req);
     const only = ['missing', 'tiles', 'all'].includes(body.only) ? body.only : 'tiles';
     let n = 0;
-    for (const l of store.links) {
+    for (const l of store.live) {
       const pick = only === 'all' || !l.snapshot || (only === 'tiles' && l.snapshotMethod === 'tile');
       if (!pick || pending.has(l.id)) continue;
       enqueueSnapshot(l.id, 'auto', null);
@@ -488,7 +661,7 @@ async function route(req, res, url) {
     if (Array.isArray(body.ids)) links = body.ids.map((id) => store.findById(id)).filter(Boolean);
     else {
       const only = ['missing', 'tiles', 'all'].includes(body.only) ? body.only : 'tiles';
-      links = store.links.filter((l) => only === 'all' || !l.snapshot || (only === 'tiles' && l.snapshotMethod === 'tile'));
+      links = store.live.filter((l) => only === 'all' || !l.snapshot || (only === 'tiles' && l.snapshotMethod === 'tile'));
     }
     if (!links.length) return sendJson(res, 200, { started: false, reason: 'nothing to capture', batch: browserbatch.status() });
     try {
@@ -514,7 +687,7 @@ async function route(req, res, url) {
   if (p === '/api/snapshots/browser/stop' && method === 'POST') return sendJson(res, 200, { batch: browserbatch.stop() });
   if (p === '/api/snapshots/browser' && method === 'GET') return sendJson(res, 200, { batch: browserbatch.status() });
 
-  // Wipe every link and its snapshots (and, on request, the folder list). Needs confirm: "DELETE".
+  // Wipe every link and its snapshots, trash included (and, on request, the folder list). Needs confirm: "DELETE".
   if (p === '/api/links/delete-all' && method === 'POST') {
     const body = await readJson(req);
     if (body.confirm !== 'DELETE') throw new HttpError(400, 'send {"confirm":"DELETE"} to delete everything');
@@ -529,15 +702,117 @@ async function route(req, res, url) {
     return sendJson(res, 200, { deleted: n, foldersRemoved });
   }
 
+  // Bulk edit. body: { ids: [...], op, folder?, tags? } with op one of
+  // move (folder, "" unfiles), tag (add tags), untag (remove tags), trash, restore, purge, check.
+  if (p === '/api/links/bulk' && method === 'POST') {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? [...new Set(body.ids.map(String))] : [];
+    const op = String(body.op || '');
+    if (!ids.length) throw new HttpError(400, 'ids is required');
+    if (!['move', 'tag', 'untag', 'trash', 'restore', 'purge', 'check'].includes(op)) throw new HttpError(400, `unknown op "${op}"`);
+    const tags = normalizeTags(body.tags);
+    if ((op === 'tag' || op === 'untag') && !tags.length) throw new HttpError(400, 'tags is required');
+    const folder = op === 'move' ? setFolder(body.folder) : null;
+    const skipped = [];
+    let changed = 0;
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      const link = store.findById(id);
+      if (!link) { skipped.push({ id, reason: 'no such link' }); continue; }
+      try {
+        if (op === 'move') { if ((link.folder || null) === folder) continue; link.folder = folder; link.updated = now; }
+        else if (op === 'tag') { const before = (link.tags || []).length; link.tags = normalizeTags([...(link.tags || []), ...tags]); if (link.tags.length === before) continue; link.updated = now; }
+        else if (op === 'untag') { const before = (link.tags || []).length; link.tags = (link.tags || []).filter((t) => !tags.includes(t)); if (link.tags.length === before) continue; link.updated = now; }
+        else if (op === 'trash') { if (link.deleted) continue; trashLink(link, { batch: true }); }
+        else if (op === 'restore') { if (!link.deleted) continue; restoreLink(link, { batch: true }); }
+        else if (op === 'purge') { purgeLink(link, { batch: true }); }
+        else if (op === 'check') { if (!link.deleted) enqueueCheck(link.id); }
+        changed++;
+      } catch (err) {
+        skipped.push({ id, title: link.title, reason: err.message });
+      }
+    }
+    if (op !== 'check') { store.save('links'); reindex(); }
+    return sendJson(res, 200, { op, changed, skipped, ids });
+  }
+
+  // The trash: list, empty. Single links restore or purge through /api/links/:id/...
+  if (p === '/api/trash' && method === 'GET') {
+    const links = store.trashed.map(decorate);
+    return sendJson(res, 200, { total: links.length, days: store.settings.trashDays || 30, links });
+  }
+  if (p === '/api/trash/empty' && method === 'POST') {
+    const gone = store.trashed;
+    for (const l of gone) purgeLink(l, { batch: true });
+    store.save('links'); reindex();
+    log('[trash] emptied', gone.length);
+    return sendJson(res, 200, { deleted: gone.length });
+  }
+
+  // Dead link check: status, and queueing. body.only: due (default) | all | broken | unchecked, or body.ids.
+  if (p === '/api/check' && method === 'GET') return sendJson(res, 200, checkStatus());
+  if (p === '/api/check' && method === 'POST') {
+    const body = await readJson(req);
+    let n = 0;
+    if (Array.isArray(body.ids)) { for (const id of body.ids) { const l = store.findById(String(id)); if (l && !l.deleted && enqueueCheck(l.id)) n++; } }
+    else n = scheduleChecks(['all', 'broken', 'unchecked', 'due'].includes(body.only) ? body.only : 'due');
+    return sendJson(res, 202, { queued: n, status: checkStatus() });
+  }
+
+  // Duplicates: groups, merge, dismiss.
+  if (p === '/api/duplicates' && method === 'GET') {
+    const groups = duplicateGroups().map((g) => ({ ...g, links: g.ids.map((id) => decorate(store.findById(id))) }));
+    return sendJson(res, 200, { total: groups.length, groups });
+  }
+  if (p === '/api/duplicates/merge' && method === 'POST') {
+    const body = await readJson(req);
+    const keep = getLinkOr404(String(body.keep || ''));
+    if (keep.deleted) throw new HttpError(400, 'the link to keep is in the trash');
+    const remove = Array.isArray(body.remove) ? body.remove.map(String) : [];
+    const r = mergeLinks(keep, remove);
+    log('[merge]', r.merged.join(','), '->', keep.id, r.changed.join(','));
+    return sendJson(res, 200, { link: decorate(r.link), merged: r.merged, changed: r.changed });
+  }
+  if (p === '/api/duplicates/ignore' && method === 'POST') {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? [...new Set(body.ids.map(String))] : [];
+    if (ids.length < 2) throw new HttpError(400, 'at least two ids are required');
+    const set = new Set(store.settings.dupIgnore || []);
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) set.add(dupes.pairKey(ids[i], ids[j]));
+    store.settings.dupIgnore = [...set];
+    store.save('settings');
+    return sendJson(res, 200, { ignored: ids, total: duplicateGroups().length });
+  }
+
   if (seg[0] === 'api' && seg[1] === 'links' && seg[2]) {
     const link = getLinkOr404(seg[2]);
     if (seg.length === 3) {
       if (method === 'GET') return sendJson(res, 200, { link: decorate(link) });
       if (method === 'PUT' || method === 'PATCH') {
         const body = await readJson(req);
+        if (link.deleted) throw new HttpError(409, 'this link is in the trash; restore it first');
         return sendJson(res, 200, { link: decorate(updateLink(link, body)) });
       }
-      if (method === 'DELETE') { deleteLink(link); return sendJson(res, 200, { ok: true, id: link.id }); }
+      // DELETE moves to the trash; ?permanent=1 (or a link already in the trash) removes it for good.
+      if (method === 'DELETE') {
+        const permanent = url.searchParams.has('permanent') || Boolean(link.deleted);
+        if (permanent) { purgeLink(link); return sendJson(res, 200, { ok: true, id: link.id, purged: true }); }
+        trashLink(link);
+        return sendJson(res, 200, { ok: true, id: link.id, trashed: true, link: decorate(link) });
+      }
+    }
+    if (seg[3] === 'restore' && method === 'POST') {
+      const r = restoreLink(link);
+      return sendJson(res, 200, { link: decorate(r.link), notes: r.notes });
+    }
+    if (seg[3] === 'purge' && method === 'POST') { purgeLink(link); return sendJson(res, 200, { ok: true, id: link.id, purged: true }); }
+    if (seg[3] === 'check' && method === 'POST') {
+      // synchronous, so the drawer can show the outcome
+      if (checkPending.has(link.id)) throw new HttpError(409, 'a check for this link is already running');
+      checkPending.add(link.id);
+      try { link.check = await linkcheck.checkUrl(link.url, link.check); } finally { checkPending.delete(link.id); }
+      store.save('links'); reindex();
+      return sendJson(res, 200, { link: decorate(link) });
     }
     if (seg[3] === 'use' && method === 'POST') { recordUse(link); return sendJson(res, 200, { link: decorate(link) }); }
     if (seg[3] === 'suggest' && method === 'GET') {
@@ -615,7 +890,7 @@ async function route(req, res, url) {
     const body = await readJson(req, 50 * 1024 * 1024);
     let loaded;
     try { loaded = importer.loadBookmarksFile(body.source || 'chrome', body.path, body.content); } catch (err) { throw new HttpError(400, err.message); }
-    const items = importer.preview(loaded.items, store);
+    const items = importer.preview(loaded.items, previewStore());
     return sendJson(res, 200, { source: body.source || 'file', path: loaded.path, total: items.length, duplicates: items.filter((i) => i.duplicate).length, items });
   }
   // Any supported file: Chrome Bookmarks JSON, Golinks JSON, bookmarks HTML, CSV, XLSX, Markdown, text.
@@ -625,14 +900,14 @@ async function route(req, res, url) {
     const content = body.encoding === 'base64' ? Buffer.from(String(body.content || ''), 'base64') : String(body.content || '');
     let loaded;
     try { loaded = importer.loadAny(body.name || '', content); } catch (err) { throw new HttpError(400, err.message); }
-    const items = importer.preview(loaded.items, store);
+    const items = importer.preview(loaded.items, previewStore());
     return sendJson(res, 200, { source: loaded.format, format: loaded.format, name: body.name || '', total: items.length, duplicates: items.filter((i) => i.duplicate).length, items });
   }
   if (p === '/api/export' && method === 'GET') {
     const format = param(url, 'format', 'json');
     if (!exporter.FORMATS[format]) throw new HttpError(400, `unknown format "${format}"`);
     const opts = { folder: folderParam(url), tag: param(url, 'tag', null) || null, version: VERSION };
-    const r = exporter.exportLinks(format, store.links, store.folders, opts);
+    const r = exporter.exportLinks(format, store.live, store.folders, opts);
     if (url.searchParams.has('preview')) return sendJson(res, 200, { count: r.count, filename: r.filename, format });
     res.writeHead(200, { 'content-type': r.mime, 'content-disposition': `attachment; filename="${r.filename}"`, 'cache-control': 'no-store' });
     res.end(r.body);
@@ -640,7 +915,7 @@ async function route(req, res, url) {
   }
   if (p === '/api/import/text' && method === 'POST') {
     const body = await readJson(req, 10 * 1024 * 1024);
-    const items = importer.preview(importer.extractFromText(body.text), store);
+    const items = importer.preview(importer.extractFromText(body.text), previewStore());
     return sendJson(res, 200, { source: 'text', total: items.length, duplicates: items.filter((i) => i.duplicate).length, items });
   }
   if (p === '/api/import/commit' && method === 'POST') {
@@ -690,6 +965,9 @@ async function route(req, res, url) {
       if ('topCrop' in body) { const n = Number(body.topCrop); if (!(n >= 0 && n <= 400)) throw new HttpError(400, 'topCrop must be 0..400'); s.topCrop = n; }
       if ('setup' in body && body.setup && typeof body.setup === 'object') s.setup = Object.assign({}, s.setup || {}, body.setup);
       if ('goMinScore' in body) { const n = Number(body.goMinScore); if (!(n >= 0 && n <= 10)) throw new HttpError(400, 'goMinScore must be 0..10'); s.goMinScore = n; }
+      if ('trashDays' in body) { const n = Number(body.trashDays); if (!(n >= 1 && n <= 3650)) throw new HttpError(400, 'trashDays must be 1..3650'); s.trashDays = n; }
+      if ('checkDays' in body) { const n = Number(body.checkDays); if (!(n >= 1 && n <= 365)) throw new HttpError(400, 'checkDays must be 1..365'); s.checkDays = n; }
+      if ('linkCheck' in body) s.linkCheck = Boolean(body.linkCheck);
       store.save('settings');
       return sendJson(res, 200, { settings: s, activePort: PORT, restartRequired: s.port !== PORT });
     }
@@ -761,9 +1039,9 @@ async function route(req, res, url) {
     let moved = 0, deleted = 0;
     for (const l of [...store.links]) {
       if (!folders.isWithin(l.folder, path)) continue;
-      if (mode === 'delete') { deleteLink(l); deleted++; continue; }
+      if (mode === 'delete' && !l.deleted) { trashLink(l, { batch: true }); deleted++; continue; }
       l.folder = mode === 'parent' ? parent : null;
-      moved++;
+      if (!l.deleted) moved++;
     }
     store.data.folders = store.folders.filter((f) => !folders.isWithin(f.path, path));
     store.save('folders'); store.save('links'); reindex();
@@ -789,6 +1067,30 @@ async function route(req, res, url) {
     log('quit requested via /quit');
     setTimeout(() => shutdown(0), 150);
     return;
+  }
+
+  // Restart without Terminal: exit with a non-zero code so launchd (KeepAlive on failure)
+  // starts the service again within a few seconds. Under launchd the parent is pid 1; when
+  // run by hand (bin/golinks run) there is nobody to relaunch it, and the caller is told so.
+  if (p === '/api/restart' && method === 'POST') {
+    const relaunch = process.ppid === 1;
+    sendJson(res, 200, { ok: true, relaunch, pid: process.pid });
+    if (!relaunch) { log('restart requested, but not running under launchd; staying up'); return; }
+    log('restart requested via /api/restart');
+    setTimeout(() => shutdown(1), 200);
+    return;
+  }
+
+  // Open a System Settings pane for the user (the browser cannot open x-apple.systempreferences
+  // links reliably). body.pane: screen | automation.
+  if (p === '/api/open-settings' && method === 'POST') {
+    const body = await readJson(req);
+    const panes = { screen: 'Privacy_ScreenCapture', automation: 'Privacy_Automation' };
+    const anchor = panes[body.pane];
+    if (!anchor) throw new HttpError(400, 'pane must be screen or automation');
+    const { spawn } = require('child_process');
+    spawn('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?' + anchor], { stdio: 'ignore', detached: true }).unref();
+    return sendJson(res, 200, { ok: true, pane: body.pane });
   }
 
   throw new HttpError(404, 'not found');
