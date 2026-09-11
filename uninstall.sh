@@ -52,7 +52,7 @@ cat <<MSG
 
 Golinks is uninstalled. Things macOS and your browser keep, remove by hand if you want:
   - Browser site search "Go Links" (chrome://settings/searchEngines or brave://settings/searchEngines)
-  - The "Add to Golinks" bookmarklet on your bookmarks bar
+  - The "Golinks" bookmarklet on your bookmarks bar
   - The two Shortcuts (Links: search, Links: add current tab) in the Shortcuts app
   - Permissions granted to "node" and "Shortcuts" under System Settings > Privacy & Security
     (Automation, Screen Recording); harmless to leave in place

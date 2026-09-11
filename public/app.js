@@ -1530,7 +1530,7 @@
   // The bookmarklet button and its Copy button, shared by the Settings tab and the setup
   // checklist. bindBookmarklet wires the copy after the markup is in the page.
   function bookmarkletHtml(bm, id) {
-    return '<a class="btn" id="' + id + '" href="' + esc(bm.href) + '" onclick="return false" title="Drag me to the bookmarks bar">Add to Golinks</a> <button class="btn sm ghost" id="' + id + 'Copy" title="Copy the bookmarklet code to paste into a new bookmark by hand">Copy code</button>';
+    return '<a class="btn" id="' + id + '" href="' + esc(bm.href) + '" onclick="return false" title="Drag me to the bookmarks bar">Golinks</a> <button class="btn sm ghost" id="' + id + 'Copy" title="Copy the bookmarklet code to paste into a new bookmark by hand">Copy code</button>';
   }
   function bindBookmarklet(bm, id) {
     const b = $('#' + id + 'Copy');
@@ -1848,13 +1848,13 @@
         '<p class="small muted">Safari has no site search. There, search from this page or with the search Shortcut (see <code>shortcuts/README.md</code>).</p>') +
 
       step('bookmarklet', 'Save any page with one click',
-        '<p>The <b>Add to Golinks</b> button below is a bookmark that saves the page you are looking at, with a real screenshot, even on pages behind company sign-in.</p>' +
+        '<p>The <b>Golinks</b> button below is a bookmark that saves the page you are looking at, with a real screenshot, even on pages behind company sign-in.</p>' +
         '<ol class="steps">' +
         '<li>Show your bookmarks bar if it is hidden: press <kbd>&#8984;</kbd><kbd>Shift</kbd><kbd>B</kbd> (Chrome, Brave, Edge and Safari all use it). It is the strip of bookmarks under the address bar.</li>' +
         '<li>Drag this button onto that strip and let go: ' + bookmarkletHtml(bm, 'setupBm') + '</li>' +
-        '<li>Try it: open any web page and click <b>Add to Golinks</b> in the bookmarks bar. A small window shows the screenshot, a title and suggested tags; click <b>Save</b> (or press <kbd>&#8984;</kbd><kbd>&#8629;</kbd>).</li>' +
+        '<li>Try it: open any web page and click <b>Golinks</b> in the bookmarks bar. A small window shows the screenshot, a title and suggested tags; click <b>Save</b> (or press <kbd>&#8984;</kbd><kbd>&#8629;</kbd>).</li>' +
         '</ol>' +
-        '<p class="small muted">If dragging does not work in your browser: click <b>Copy code</b> above, right-click the bookmarks bar and choose <b>Add page</b> (Chrome, Brave), <b>Add this page to favorites</b> (Edge) or <b>Add Bookmark</b> (Safari, from the Bookmarks menu). Name it <code>Add to Golinks</code> and paste the copied code into the address or URL field.</p>') +
+        '<p class="small muted">If dragging does not work in your browser: click <b>Copy code</b> above, right-click the bookmarks bar and choose <b>Add page</b> (Chrome, Brave), <b>Add this page to favorites</b> (Edge) or <b>Add Bookmark</b> (Safari, from the Bookmarks menu). Name it <code>Golinks</code> and paste the copied code into the address or URL field.</p>') +
 
       step('permissions', 'Allow screenshots of your browser',
         '<p>Screenshots are taken by the Golinks service, which macOS lists under the name <b>node</b>. It needs two permissions, both one-time. The result of each check shows at the bottom of this step.</p>' +

@@ -121,7 +121,7 @@ out of the sidebar and stays reachable under Settings.
    Every value has a Copy button. Safari has no site search; use the UI or the
    search Shortcut there.
 3. **Save any page with one click.** Show the bookmarks bar (Cmd+Shift+B) and
-   drag the "Add to Golinks" button onto it. If dragging does not work, Copy
+   drag the "Golinks" button onto it. If dragging does not work, Copy
    code and paste it into a new bookmark by hand; the page explains how.
 4. **Allow screenshots of your browser.** macOS has to let the service, listed
    as `node`, read browser tabs (Automation, asked in a pop-up on first use) and

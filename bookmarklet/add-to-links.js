@@ -1,4 +1,4 @@
-// "Add to Golinks" bookmarklet source. The service serves a minified javascript: URL
+// "Golinks" bookmarklet source. The service serves a minified javascript: URL
 // at GET /api/bookmarklet with __PORT__ filled in. Keep this file free of
 // single-line comments at the end of code lines; the minifier drops whole-line
 // comments only.

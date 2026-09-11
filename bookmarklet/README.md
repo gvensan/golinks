@@ -1,4 +1,4 @@
-# Add to Golinks bookmarklet
+# Golinks bookmarklet
 
 The bookmarklet is the capture path that works even when Chrome automation or
 screen recording permission is blocked. It runs in the page you are looking at,
@@ -8,7 +8,7 @@ local service where you confirm title and tags.
 ## Install
 
 1. Open the web UI, go to Setup checklist (or Settings).
-2. Drag the "Add to Golinks" button to the bookmarks bar of any browser.
+2. Drag the "Golinks" button to the bookmarks bar of any browser.
    Alternatively copy the `javascript:` URL shown there and create a bookmark
    with it as the address.
 
