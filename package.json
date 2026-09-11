@@ -1,5 +1,5 @@
 {
-  "name": "golinks",
+  "name": "go-links",
   "version": "1.2.0",
   "description": "Local smart bookmarks service for macOS. Zero dependencies.",
   "main": "server.js",

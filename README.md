@@ -74,22 +74,22 @@ Open **Terminal** (press Cmd+Space, type `Terminal`, press Return), paste this
 line and press Return:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/gvensan/golinks/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gvensan/go-links/master/install.sh | bash
 ```
 
-That downloads Golinks to a `golinks` folder in your home folder, registers the
+That downloads Golinks to a `go-links` folder in your home folder, registers the
 service to start at login, and opens the setup checklist in your browser at
 http://localhost:7777/#/settings/setup. Set `GOLINKS_DIR=/some/path` before
 the command to install somewhere else.
 
 **Prefer to download by hand?** On the
-[GitHub page](https://github.com/gvensan/golinks) click the green **Code**
+[GitHub page](https://github.com/gvensan/go-links) click the green **Code**
 button, then **Download ZIP**. Double-click the zip in Downloads to unpack it,
-drag the `golinks-master` folder into your home folder (the one with the house
-icon in Finder) and rename it `golinks`. Then, in Terminal:
+drag the `go-links-master` folder into your home folder (the one with the house
+icon in Finder) and rename it `go-links`. Then, in Terminal:
 
 ```
-cd ~/golinks
+cd ~/go-links
 bash install.sh
 ```
 
@@ -101,8 +101,8 @@ your links are stored in it. Do not unzip a newer version over it later, use
 **Developers**:
 
 ```
-git clone git@github.com:gvensan/golinks.git ~/golinks
-cd ~/golinks && ./install.sh
+git clone git@github.com:gvensan/go-links.git ~/go-links
+cd ~/go-links && ./install.sh
 ```
 
 ### Step 3: the setup checklist

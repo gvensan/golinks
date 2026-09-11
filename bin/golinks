@@ -13,7 +13,7 @@ STABLE_LINK="$HOME/.golinks"
 OLD_STABLE_LINK=""
 LINKS_HOME="${LINKS_HOME:-$ROOT}"
 MIN_NODE=18
-REPO="${GOLINKS_REPO:-gvensan/golinks}"
+REPO="${GOLINKS_REPO:-gvensan/go-links}"
 BRANCH="${GOLINKS_BRANCH:-master}"
 TARBALL="https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz"
 

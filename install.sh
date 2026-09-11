@@ -2,14 +2,14 @@
 # One-step install for Golinks.
 #
 #   From a downloaded zip or a git clone, inside the folder:   bash install.sh
-#   Without downloading anything first (installs to ~/golinks):
-#     curl -fsSL https://raw.githubusercontent.com/gvensan/golinks/master/install.sh | bash
+#   Without downloading anything first (installs to ~/go-links):
+#     curl -fsSL https://raw.githubusercontent.com/gvensan/go-links/master/install.sh | bash
 #
-# Set GOLINKS_DIR to install somewhere other than ~/golinks.
+# Set GOLINKS_DIR to install somewhere other than ~/go-links.
 set -euo pipefail
 if [ "$(uname)" != "Darwin" ]; then echo "Golinks runs on macOS only."; exit 1; fi
 
-REPO="${GOLINKS_REPO:-gvensan/golinks}"
+REPO="${GOLINKS_REPO:-gvensan/go-links}"
 BRANCH="${GOLINKS_BRANCH:-master}"
 TARBALL="https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz"
 
@@ -21,7 +21,7 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
 fi
 
 if [ -z "$ROOT" ]; then
-  ROOT="${GOLINKS_DIR:-$HOME/golinks}"
+  ROOT="${GOLINKS_DIR:-$HOME/go-links}"
   echo "Downloading Golinks to $ROOT"
   tmp="$(mktemp -d)"
   curl -fsSL "$TARBALL" | tar -xz -C "$tmp" || { echo "download failed"; rm -rf "$tmp"; exit 1; }

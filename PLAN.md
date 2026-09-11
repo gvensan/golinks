@@ -17,7 +17,7 @@ No new applications, no compiled binaries, no npm packages with native code, no 
 ## Shape of the outcome
 
 ```
-golinks/
+go-links/
   PLAN.md
   server.js              Node HTTP service, no dependencies, port 7777
   lib/                   search, ranking, rules, import, snapshots, store
