@@ -12,3 +12,4 @@ bin/node
 
 # Demo recording scripts and seed data stay local
 docs/demo/
+work/
